@@ -52,6 +52,11 @@ def plot_radar_chart(df, plots_dir='./plots',
     if model_name_mapping is None:
         model_name_mapping = MODEL_NAME_MAPPING
 
+    # Normalize column names to lowercase to handle both capitalize (from
+    # calculate_metrics_gnn) and lowercase (from CSV) variants.
+    df = df.copy()
+    df.columns = [c.lower() if c != 'model' else c for c in df.columns]
+
     df_avg = df.groupby('model', observed=False).mean(numeric_only=True).reset_index()
     metrics_to_plot = ['precision', 'recall', 'f1', 'f2', 'auc-pr', 'auc-roc']
     categories = [m.upper() for m in metrics_to_plot]
@@ -98,6 +103,11 @@ def plot_comparison(df, plots_dir='./plots', colors=None):
     os.makedirs(plots_dir, exist_ok=True)
     if colors is None:
         colors = MODEL_COLORS
+
+    # Normalize column names to lowercase so this works whether columns come
+    # from calculate_metrics_gnn (capitalized) or loaded from CSV (lowercase).
+    df = df.copy()
+    df.columns = [c.lower() if c != 'model' else c for c in df.columns]
 
     metrics_to_plot = ['precision', 'recall', 'f1', 'f2', 'auc-pr', 'auc-roc']
     available = [m for m in metrics_to_plot if m in df.columns]
