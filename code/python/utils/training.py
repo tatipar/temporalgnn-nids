@@ -132,11 +132,12 @@ def evaluate(model, loader, criterion, device, is_temporal=False):
     return avg_loss, np.array(all_trues), np.array(all_probs)
 
 
-def find_optimal_threshold_constrained(model, loader, device,
-                                       is_temporal=False, min_precision=0.90):
+def find_optimal_threshold(model, loader, device,
+                           is_temporal=False,
+                           strategy='max_f1',
+                           min_precision=0.90):
     """
-    Find the decision threshold that maximises recall subject to a precision
-    floor. Falls back to max-F1 if no threshold meets the precision constraint.
+    Find the optimal decision threshold on a validation set.
 
     Parameters
     ----------
@@ -144,7 +145,10 @@ def find_optimal_threshold_constrained(model, loader, device,
     loader        : DataLoader (typically validation set)
     device        : torch.device
     is_temporal   : bool
-    min_precision : float — minimum acceptable precision (default 0.90)
+    strategy      : 'max_f1'        — maximise F1 (default, used for final evaluation)
+                    'constrained'   — maximise recall subject to precision >= min_precision,
+                                      fallback to max-F1 if constraint is not met
+    min_precision : float — precision floor for strategy='constrained' (default 0.90)
 
     Returns
     -------
@@ -187,17 +191,27 @@ def find_optimal_threshold_constrained(model, loader, device,
     precisions, recalls, thresholds = precision_recall_curve(y_true, y_probs)
     precisions = precisions[:-1]
     recalls    = recalls[:-1]
+    f1_scores  = 2 * (precisions * recalls) / (precisions + recalls + 1e-10)
 
-    valid = np.where(precisions >= min_precision)[0]
-    if len(valid) > 0:
-        best_idx = valid[np.argmax(recalls[valid])]
-        strategy = f"Max Recall @ Prec>={min_precision}"
-    else:
-        f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-10)
-        best_idx  = np.argmax(f1_scores)
-        strategy  = "Max F1 (Fallback)"
+    if strategy == 'constrained':
+        valid = np.where(precisions >= min_precision)[0]
+        if len(valid) > 0:
+            best_idx     = valid[np.argmax(recalls[valid])]
+            strategy_msg = f"Max Recall @ Prec>={min_precision}"
+        else:
+            best_idx     = np.argmax(f1_scores)
+            strategy_msg = "Max F1 (Fallback — precision constraint not met)"
+    else:  # 'max_f1'
+        best_idx     = np.argmax(f1_scores)
+        strategy_msg = "Max F1"
 
     best_th = thresholds[best_idx]
-    print(f"\nOptimal Threshold: {best_th:.4f} ({strategy})")
+    print(f"\nOptimal Threshold: {best_th:.4f} ({strategy_msg})")
 
     return best_th, y_true, y_probs
+
+
+# Backwards-compatible alias
+find_optimal_threshold_constrained = lambda *a, **kw: find_optimal_threshold(
+    *a, strategy='constrained', **kw
+)
