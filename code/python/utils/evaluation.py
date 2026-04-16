@@ -58,10 +58,12 @@ def gather_metrics(base_log_path, model_name_mapping):
                 epoch_dict[seed] = best_ep
 
         csv_files = glob.glob(os.path.join(model_dir, "metrics_newth_*.csv"))
-        csv_file  = csv_files[0] if csv_files else None
+        if not csv_files:
+            csv_files = glob.glob(os.path.join(model_dir, "run_metrics_*.csv"))
+        csv_file = csv_files[0] if csv_files else None
 
         if csv_file is None:
-            print(f" Error: No file found in {model_dir}")
+            print(f" Warning: No metrics CSV found in {model_dir}")
             continue
 
         df_csv = pd.read_csv(csv_file)
