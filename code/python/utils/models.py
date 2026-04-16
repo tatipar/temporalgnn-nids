@@ -118,6 +118,86 @@ class EdgeGRU_Baseline(nn.Module):
         return self.classifier(edge_representation)
 
 
+class EdgeGRU_Baseline_Entropy(nn.Module):
+    """
+    EdgeGRU_Baseline extended with port-entropy node features.
+    Replaces the uninformative constant node features with per-node entropy
+    statistics (out_entropy, in_entropy), indexed by edge endpoints.
+    Input per edge: [node_stats[src] || node_stats[dst] || edge_attr]
+    """
+
+    def __init__(self, edge_dim, hidden_dim, dropout, output_bias_init=None):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.node_memory = {}
+        self.use_node_stats = True
+
+        input_dim = 2 + 2 + edge_dim  # node_stats[src](2) + node_stats[dst](2) + edge_attr
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU()
+        )
+
+        self.gru = nn.GRUCell(hidden_dim, hidden_dim)
+
+        classifier_input_dim = (2 * hidden_dim) + edge_dim
+        self.classifier = nn.Sequential(
+            nn.Linear(classifier_input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1)
+        )
+
+        if output_bias_init is not None:
+            self.classifier[-1].bias.data.fill_(output_bias_init)
+
+    def manual_scatter_mean(self, src, index, dim_size):
+        out = torch.zeros((dim_size, src.size(1)), device=src.device)
+        out.index_add_(0, index, src)
+        ones = torch.ones(src.size(0), 1, device=src.device)
+        count = torch.zeros(dim_size, 1, device=src.device)
+        count.index_add_(0, index, ones)
+        count[count < 1] = 1
+        return out / count
+
+    def detach_all_memory(self):
+        for k, v in self.node_memory.items():
+            self.node_memory[k] = v.detach()
+
+    def reset_memory(self):
+        self.node_memory = {}
+
+    def forward(self, x, edge_index, edge_attr, global_node_ids, node_stats):
+        device = x.device
+        num_nodes_batch = x.size(0)
+
+        src, dst = edge_index
+
+        raw_features = torch.cat([node_stats[src], node_stats[dst], edge_attr], dim=1)
+        encoded_features = self.encoder(raw_features)
+
+        global_ids_list = global_node_ids.tolist()
+        h_prev = torch.zeros(num_nodes_batch, self.hidden_dim, device=device)
+        for i, gid in enumerate(global_ids_list):
+            if gid in self.node_memory:
+                h_prev[i] = self.node_memory[gid]
+
+        aggr_input = self.manual_scatter_mean(encoded_features, src, dim_size=num_nodes_batch)
+        h_new = self.gru(aggr_input, h_prev)
+
+        h_new_stored = h_new.clone()
+        for i, gid in enumerate(global_ids_list):
+            self.node_memory[gid] = h_new_stored[i]
+
+        edge_representation = torch.cat([h_new[src], h_new[dst], edge_attr], dim=1)
+        return self.classifier(edge_representation)
+
+
 # ===========================================================================
 # STATIC GNN MODELS
 # ===========================================================================
