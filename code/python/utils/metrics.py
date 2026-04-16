@@ -209,6 +209,7 @@ def calculate_mttd_metrics(df_real, df_tp, time_window_sec=30, max_gap_windows=5
 # SOC evaluation (multi-phase: raw → DNS correction → SMB whitelist)
 # ---------------------------------------------------------------------------
 
+@torch.no_grad()
 def evaluation_soc(
     loader,
     device,
