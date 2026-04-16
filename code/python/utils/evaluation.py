@@ -235,6 +235,107 @@ def change_threshold(model_class, model_config, val_loader, experiment_name,
     return pd.read_csv(filepath) if filepath and os.path.exists(filepath) else pd.DataFrame()
 
 
+def compute_and_save_thresholds(model_class, model_config, val_loader,
+                                experiment_name, device,
+                                results_dir="./results_earlystopping"):
+    """
+    Re-evaluate each seed on the validation set, compute the max-F1 threshold,
+    and save results to thresholds_<experiment_name>.npz.
+
+    Use this for experiments trained before run_multiple_seeds saved the .npz
+    automatically (i.e. experiments that have run_metrics_*.csv but no .npz).
+
+    Parameters
+    ----------
+    model_class     : class
+    model_config    : dict — must contain 'model_params' and 'extra_params'
+    val_loader      : DataLoader
+    experiment_name : str
+    device          : torch.device or str
+    results_dir     : str
+    """
+    csv_files = glob.glob(f"{results_dir}/logs/{experiment_name}/metrics_newth_{experiment_name}.csv")
+    if not csv_files:
+        csv_files = glob.glob(f"{results_dir}/logs/{experiment_name}/run_metrics_{experiment_name}.csv")
+    if not csv_files:
+        print(f"No metrics CSV found for {experiment_name}")
+        return
+
+    df_metrics = pd.read_csv(csv_files[0])
+    is_temporal = 'GRU' in experiment_name or 'ST' in experiment_name
+    pos_weight  = torch.tensor([model_config['extra_params']['pos_weight']]).to(device)
+    criterion   = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    all_thresholds = {}
+
+    for exp_id in range(len(df_metrics)):
+        df_exp = df_metrics.iloc[exp_id, :].copy()
+        seed   = int(df_exp['seed'])
+        run_id = df_exp['run_id'] if 'run_id' in df_exp else df_exp.get('extra_run_id', None)
+
+        model_config['model_name'] = df_exp['model_name']
+        model_config['type']       = df_exp['type']
+
+        model_paths = glob.glob(os.path.join(results_dir, "saved_models",
+                                             experiment_name, f"{run_id}_*.pth"))
+        model_path  = model_paths[0] if model_paths else None
+        if model_path is None:
+            print(f"  Error: No model found for run_id {run_id}")
+            continue
+
+        model = model_class(**model_config['model_params']).to(device)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+
+        from sklearn.metrics import precision_recall_curve
+        _, y_true, y_probs = evaluate(model, val_loader, criterion, device, is_temporal)
+        precisions, recalls, thresholds = precision_recall_curve(y_true, y_probs)
+        precisions = precisions[:-1]
+        recalls    = recalls[:-1]
+        f1_scores  = 2 * (precisions * recalls) / (precisions + recalls + 1e-10)
+        best_th    = thresholds[np.argmax(f1_scores)]
+
+        all_thresholds[f"seed_{seed}"] = best_th
+        print(f"  seed {seed}: threshold = {best_th:.16f}")
+
+    npz_path = f"{results_dir}/logs/{experiment_name}/thresholds_{experiment_name}.npz"
+    np.savez(npz_path, **all_thresholds)
+    print(f"\nSaved: {npz_path}")
+
+
+def _load_metrics_csv(results_gral_dir, experiment_name):
+    """
+    Load the metrics CSV for an experiment, falling back from metrics_newth_*.csv
+    to run_metrics_*.csv.
+
+    Also normalises column names so callers always see 'run_id' (not 'extra_run_id')
+    and 'optimal_threshold' (set to NaN if absent — threshold comes from .npz).
+
+    Returns
+    -------
+    pd.DataFrame
+    """
+    log_dir = os.path.join(results_gral_dir, "logs", experiment_name)
+    path = os.path.join(log_dir, f"metrics_newth_{experiment_name}.csv")
+    if not os.path.exists(path):
+        path = os.path.join(log_dir, f"run_metrics_{experiment_name}.csv")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"No metrics CSV found for {experiment_name} in {log_dir}"
+        )
+
+    df = pd.read_csv(path)
+
+    # Normalise run_id column name (run_metrics uses 'extra_run_id')
+    if 'run_id' not in df.columns and 'extra_run_id' in df.columns:
+        df = df.rename(columns={'extra_run_id': 'run_id'})
+
+    # Ensure optimal_threshold column exists (may be absent in run_metrics)
+    if 'optimal_threshold' not in df.columns:
+        df['optimal_threshold'] = float('nan')
+
+    return df
+
+
 def evaluate_test1(model_class, model_config, test_loader, experiment_name,
                    device, results_gral_dir, results_test_dirname=None,
                    verbose=False):
@@ -262,7 +363,7 @@ def evaluate_test1(model_class, model_config, test_loader, experiment_name,
     if results_test_dirname is not None:
         os.makedirs(os.path.join(results_gral_dir, results_test_dirname), exist_ok=True)
 
-    df_metrics     = pd.read_csv(f"{results_gral_dir}/logs/{experiment_name}/metrics_newth_{experiment_name}.csv")
+    df_metrics     = _load_metrics_csv(results_gral_dir, experiment_name)
     opt_thresholds = np.load(f"{results_gral_dir}/logs/{experiment_name}/thresholds_{experiment_name}.npz")
     all_results    = []
 
@@ -347,7 +448,7 @@ def evaluate_test2(model_class, model_config, test_loader, experiment_name,
     if results_test_dirname is not None:
         os.makedirs(os.path.join(results_gral_dir, results_test_dirname), exist_ok=True)
 
-    df_metrics     = pd.read_csv(f"{results_gral_dir}/logs/{experiment_name}/metrics_newth_{experiment_name}.csv")
+    df_metrics     = _load_metrics_csv(results_gral_dir, experiment_name)
     opt_thresholds = np.load(f"{results_gral_dir}/logs/{experiment_name}/thresholds_{experiment_name}.npz")
     all_results    = []
 
