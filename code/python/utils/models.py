@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, LayerNorm as GraphLayerNorm
+from torch_geometric.nn import MessagePassing
 
 
 # ===========================================================================
@@ -293,6 +294,79 @@ class StaticGNN_biasinit(nn.Module):
 
         src, dst = edge_index
         edge_rep = torch.cat([h2[src], h2[dst], edge_attr], dim=1)
+        return self.classifier(edge_rep)
+
+
+# ===========================================================================
+# EXTERNAL BASELINE
+# ===========================================================================
+
+class _ESAGEConv(MessagePassing):
+    """
+    Single E-GraphSAGE layer.
+
+    Aggregation: mean of concat(h_neighbor, e_edge) over in-neighbors.
+    Update:      Linear(concat(h_self, aggregated)) → ReLU.
+
+    Reference: Pujol-Perich et al., "E-GraphSAGE: A Graph Neural Network
+    based Intrusion Detection System for IoT", IEEE NOMS 2022.
+    """
+
+    def __init__(self, in_channels, out_channels, edge_dim):
+        super().__init__(aggr='mean', flow='source_to_target')
+        # concat(h_self, mean(concat(h_neighbor, edge))) → out
+        self.lin = nn.Linear(in_channels + in_channels + edge_dim, out_channels)
+
+    def forward(self, x, edge_index, edge_attr):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+
+    def message(self, x_j, edge_attr):
+        return torch.cat([x_j, edge_attr], dim=1)
+
+    def update(self, aggr_out, x):
+        return F.relu(self.lin(torch.cat([x, aggr_out], dim=1)))
+
+
+class E_GraphSAGE(nn.Module):
+    """
+    E-GraphSAGE adapted for edge (flow) classification.
+
+    Faithfully reproduces the published architecture using the same graph
+    construction, splits, and evaluation protocol as our models.
+    Node features: 16-dim dummy vector (ones), identical to the original.
+
+    Forward: (x, edge_index, edge_attr) — no global_node_ids, non-temporal.
+    """
+
+    def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None):
+        super().__init__()
+        self.dropout_rate = dropout
+
+        self.sage1 = _ESAGEConv(node_dim,    hidden_dim, edge_dim)
+        self.sage2 = _ESAGEConv(hidden_dim,  hidden_dim, edge_dim)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(2 * hidden_dim + edge_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+        if output_bias_init is not None:
+            self.classifier[-1].bias.data.fill_(output_bias_init)
+
+    def forward(self, x, edge_index, edge_attr):
+        if x.size(0) == 0:
+            return torch.empty((0, 1), device=x.device)
+
+        h = F.dropout(self.sage1(x, edge_index, edge_attr),
+                      p=self.dropout_rate, training=self.training)
+        h = self.sage2(h, edge_index, edge_attr)
+
+        src, dst = edge_index
+        edge_rep = torch.cat([h[src], h[dst], edge_attr], dim=1)
         return self.classifier(edge_rep)
 
 
