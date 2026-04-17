@@ -127,7 +127,7 @@ class EdgeGRU_Baseline_Entropy(nn.Module):
     Input per edge: [node_stats[src] || node_stats[dst] || edge_attr]
     """
 
-    def __init__(self, edge_dim, hidden_dim, dropout, output_bias_init=None):
+    def __init__(self, edge_dim, hidden_dim, dropout, output_bias_init=None, node_dim=None):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.node_memory = {}

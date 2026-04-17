@@ -345,6 +345,10 @@ def evaluate_test1(model_class, model_config, test_loader, experiment_name,
     Loads each trained model, applies the saved optimal threshold, and computes
     metrics. Optionally saves results to a CSV file.
 
+    If the output CSV already exists, it is loaded directly and inference is
+    skipped — allows resuming interrupted evaluation runs without re-running
+    completed experiments.
+
     Parameters
     ----------
     model_class          : class
@@ -362,6 +366,11 @@ def evaluate_test1(model_class, model_config, test_loader, experiment_name,
     """
     if results_test_dirname is not None:
         os.makedirs(os.path.join(results_gral_dir, results_test_dirname), exist_ok=True)
+        cached = os.path.join(results_gral_dir, results_test_dirname,
+                              f"test1_metrics_{experiment_name}.csv")
+        if os.path.exists(cached):
+            print(f"  Skipping inference — loaded from cache: {cached}")
+            return pd.read_csv(cached)
 
     df_metrics     = _load_metrics_csv(results_gral_dir, experiment_name)
     opt_thresholds = np.load(f"{results_gral_dir}/logs/{experiment_name}/thresholds_{experiment_name}.npz")
