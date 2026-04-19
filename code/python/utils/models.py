@@ -301,6 +301,91 @@ class StaticGNN_biasinit(nn.Module):
 # EXTERNAL BASELINE
 # ===========================================================================
 
+class EdgeGRU_Baseline_NoX(nn.Module):
+    """
+    Temporal baseline without node features.
+
+    Encodes only edge_attr (no dummy node vectors), then aggregates per
+    source node and updates a per-node GRU hidden state across windows.
+    This is the clean "time-only" ablation: temporal memory without any
+    graph-convolution or node-feature signal.
+
+    Forward: (x, edge_index, edge_attr, global_node_ids)
+    x is accepted for interface compatibility but not used in computation.
+    """
+
+    def __init__(self, edge_dim, hidden_dim, dropout, output_bias_init=None, node_dim=None):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.node_memory = {}
+
+        self.encoder = nn.Sequential(
+            nn.Linear(edge_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU()
+        )
+
+        self.gru = nn.GRUCell(hidden_dim, hidden_dim)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(2 * hidden_dim + edge_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1)
+        )
+
+        if output_bias_init is not None:
+            self.classifier[-1].bias.data.fill_(output_bias_init)
+
+    def manual_scatter_mean(self, src, index, dim_size):
+        out = torch.zeros((dim_size, src.size(1)), device=src.device)
+        out.index_add_(0, index, src)
+        ones = torch.ones(src.size(0), 1, device=src.device)
+        count = torch.zeros(dim_size, 1, device=src.device)
+        count.index_add_(0, index, ones)
+        count[count < 1] = 1
+        return out / count
+
+    def detach_all_memory(self):
+        for k, v in self.node_memory.items():
+            self.node_memory[k] = v.detach()
+
+    def reset_memory(self):
+        self.node_memory = {}
+
+    def forward(self, x, edge_index, edge_attr, global_node_ids):
+        device = x.device
+        num_nodes_batch = x.size(0)
+
+        src, dst = edge_index
+
+        encoded_features = self.encoder(edge_attr)
+
+        global_ids_list = global_node_ids.tolist()
+        h_prev = torch.zeros(num_nodes_batch, self.hidden_dim, device=device)
+        for i, gid in enumerate(global_ids_list):
+            if gid in self.node_memory:
+                h_prev[i] = self.node_memory[gid]
+
+        aggr_input = self.manual_scatter_mean(encoded_features, src, dim_size=num_nodes_batch)
+        h_new = self.gru(aggr_input, h_prev)
+
+        h_new_stored = h_new.clone()
+        for i, gid in enumerate(global_ids_list):
+            self.node_memory[gid] = h_new_stored[i]
+
+        edge_representation = torch.cat([h_new[src], h_new[dst], edge_attr], dim=1)
+        return self.classifier(edge_representation)
+
+
+# ===========================================================================
+# EXTERNAL BASELINE
+# ===========================================================================
+
 class _ESAGEConv(MessagePassing):
     """
     Single E-GraphSAGE layer.
@@ -362,6 +447,54 @@ class E_GraphSAGE(nn.Module):
             return torch.empty((0, 1), device=x.device)
 
         h = F.dropout(self.sage1(x, edge_index, edge_attr),
+                      p=self.dropout_rate, training=self.training)
+        h = self.sage2(h, edge_index, edge_attr)
+
+        src, dst = edge_index
+        edge_rep = torch.cat([h[src], h[dst], edge_attr], dim=1)
+        return self.classifier(edge_rep)
+
+
+class E_GraphSAGE_Entropy(nn.Module):
+    """
+    E-GraphSAGE with port-entropy node features.
+
+    Replaces the 16-dim dummy node vector with per-node entropy statistics
+    (out_entropy, in_entropy) — 2-dim, normalized to [0,1].
+    Message passing propagates and aggregates entropy across the neighborhood,
+    which is meaningful for a GNN (unlike EdgeGRU where no aggregation occurs).
+
+    Forward: (x, edge_index, edge_attr, node_stats) — non-temporal.
+    x is accepted for interface compatibility but not used in computation.
+    """
+
+    ENTROPY_DIM = 2
+
+    def __init__(self, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None, node_dim=None):
+        super().__init__()
+        self.use_node_stats = True
+        self.dropout_rate = dropout
+
+        self.sage1 = _ESAGEConv(self.ENTROPY_DIM, hidden_dim, edge_dim)
+        self.sage2 = _ESAGEConv(hidden_dim, hidden_dim, edge_dim)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(2 * hidden_dim + edge_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+        if output_bias_init is not None:
+            self.classifier[-1].bias.data.fill_(output_bias_init)
+
+    def forward(self, x, edge_index, edge_attr, node_stats):
+        if x.size(0) == 0:
+            return torch.empty((0, 1), device=x.device)
+
+        h = F.dropout(self.sage1(node_stats, edge_index, edge_attr),
                       p=self.dropout_rate, training=self.training)
         h = self.sage2(h, edge_index, edge_attr)
 
