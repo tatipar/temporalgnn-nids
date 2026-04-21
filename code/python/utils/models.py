@@ -388,25 +388,25 @@ class EdgeGRU_Baseline_NoX(nn.Module):
 
 class _ESAGEConv(MessagePassing):
     """
-    Single E-GraphSAGE layer.
+    Single E-GraphSAGE layer (Lo et al. 2022, Algorithm 1).
 
-    Aggregation: mean of concat(h_neighbor, e_edge) over in-neighbors.
-    Update:      Linear(concat(h_self, aggregated)) → ReLU.
+    Message:     each edge sends its own features e_uv (no neighbor node embedding).
+    Aggregation: mean of incident edge features at node v.
+    Update:      Linear(concat(h_v, mean_edges)) → ReLU.
 
-    Reference: Pujol-Perich et al., "E-GraphSAGE: A Graph Neural Network
-    based Intrusion Detection System for IoT", IEEE NOMS 2022.
+    Linear input is in_channels + edge_dim because the aggregated vector
+    has size edge_dim (edge features only, not neighbor embeddings).
     """
 
     def __init__(self, in_channels, out_channels, edge_dim):
         super().__init__(aggr='mean', flow='source_to_target')
-        # concat(h_self, mean(concat(h_neighbor, edge))) → out
-        self.lin = nn.Linear(in_channels + in_channels + edge_dim, out_channels)
+        self.lin = nn.Linear(in_channels + edge_dim, out_channels)
 
     def forward(self, x, edge_index, edge_attr):
         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
-    def message(self, x_j, edge_attr):
-        return torch.cat([x_j, edge_attr], dim=1)
+    def message(self, edge_attr):
+        return edge_attr
 
     def update(self, aggr_out, x):
         return F.relu(self.lin(torch.cat([x, aggr_out], dim=1)))
@@ -416,11 +416,14 @@ class E_GraphSAGE(nn.Module):
     """
     E-GraphSAGE adapted for edge (flow) classification.
 
-    Faithfully reproduces the published architecture using the same graph
-    construction, splits, and evaluation protocol as our models.
-    Node features: 16-dim dummy vector (ones), identical to the original.
+    Message passing follows Lo et al. 2022 (Alg. 1): aggregates incident
+    edge features without including neighbor node embeddings.
+    Classifier: concat(h_src, h_dst, edge_attr) → MLP, following
+    Chang & Branco 2021 (arXiv:2111.13597) to preserve edge features
+    that are diluted during aggregation. hidden_dim=32 for equal-capacity
+    comparison.
 
-    Forward: (x, edge_index, edge_attr) — no global_node_ids, non-temporal.
+    Forward: (x, edge_index, edge_attr) — non-temporal, no global_node_ids.
     """
 
     def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None):
