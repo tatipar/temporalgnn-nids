@@ -410,6 +410,9 @@ class _ESAGEConv(MessagePassing):
     def message(self, edge_attr):
         return edge_attr
 
+    def update(self, aggr_out, **kwargs):
+        return aggr_out
+
 
 class E_GraphSAGE(nn.Module):
     """
