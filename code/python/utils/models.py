@@ -403,13 +403,12 @@ class _ESAGEConv(MessagePassing):
         self.lin = nn.Linear(in_channels + edge_dim, out_channels)
 
     def forward(self, x, edge_index, edge_attr):
-        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+        n = x.size(0)
+        aggr = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=(n, n))
+        return F.relu(self.lin(torch.cat([x, aggr], dim=1)))
 
     def message(self, edge_attr):
         return edge_attr
-
-    def update(self, aggr_out, x):
-        return F.relu(self.lin(torch.cat([x, aggr_out], dim=1)))
 
 
 class E_GraphSAGE(nn.Module):
