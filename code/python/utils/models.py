@@ -410,7 +410,7 @@ class _ESAGEConv(MessagePassing):
     def message(self, edge_attr):
         return edge_attr
 
-    def update(self, aggr_out, **kwargs):
+    def update(self, aggr_out, x=None):
         return aggr_out
 
 
