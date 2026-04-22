@@ -333,7 +333,7 @@ def analyze_early_warning(df_mitre, time_window_sec):
     return result
 
 
-def analyze_all_lateral_movements_pairs(df_tp, time_window_sec=30):
+def analyze_all_lateral_movements_pairs(df_tp, time_window_sec=30, ignore_unknown=True):
     """
     Track all IP pairs involved in Lateral Movement and compute per-pair lead time.
 
@@ -345,6 +345,9 @@ def analyze_all_lateral_movements_pairs(df_tp, time_window_sec=30):
     ----------
     df_tp           : pd.DataFrame — true positive flows from extract_mitre_events
     time_window_sec : int
+    ignore_unknown  : bool — if True (default), exclude Unknown-tactic flows from the
+                      early-warning search so that beaconing to unconfigured IPs does
+                      not inflate lead time
 
     Returns
     -------
@@ -362,11 +365,14 @@ def analyze_all_lateral_movements_pairs(df_tp, time_window_sec=30):
         pair_lm_df   = lm_df[(lm_df["Source_IP"] == src) & (lm_df["Dest_IP"] == dst)]
         first_lm_idx = pair_lm_df["Graph_Window_Idx"].min()
 
-        history = df[
+        candidate = df[
             ((df["Source_IP"] == src) | (df["Dest_IP"] == src) |
              (df["Source_IP"] == dst) | (df["Dest_IP"] == dst)) &
             (df["Graph_Window_Idx"] <= first_lm_idx)
         ]
+        if ignore_unknown:
+            candidate = candidate[candidate["MITRE_Tactic_Base"] != "Unknown"]
+        history = candidate
 
         if not history.empty:
             first_alert_idx = history["Graph_Window_Idx"].min()
