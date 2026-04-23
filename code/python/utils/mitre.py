@@ -1,4 +1,5 @@
 import ipaddress
+from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -426,3 +427,129 @@ def analyze_all_lateral_movements_pairs(df_tp, time_window_sec=30, ignore_unknow
         print("\n")
 
     return df_results.sort_values("Lead_Time_Min", ascending=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Attack infrastructure identification
+# ─────────────────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def count_attack_ip_pairs(loaders, device, id_to_ip_dict):
+    """
+    Count (src_ip, dst_ip) pairs across all flows labelled as attack (y == 1).
+
+    Parameters
+    ----------
+    loaders       : DataLoader or list[DataLoader]
+    device        : torch.device
+    id_to_ip_dict : dict — global_node_id → IP string
+
+    Returns
+    -------
+    collections.Counter  { (src_ip, dst_ip): flow_count }
+    """
+    if not isinstance(loaders, (list, tuple)):
+        loaders = [loaders]
+
+    pair_counts = Counter()
+    for loader in loaders:
+        for data in loader:
+            data = data.to(device)
+            if data.x.shape[0] == 0:
+                continue
+            trues      = data.y.cpu().numpy()
+            edges      = data.edge_index.cpu().numpy()
+            global_ids = data.global_node_ids.cpu().numpy()
+            for i in np.where(trues == 1)[0]:
+                src = id_to_ip_dict.get(global_ids[edges[0, i]], "Unknown")
+                dst = id_to_ip_dict.get(global_ids[edges[1, i]], "Unknown")
+                pair_counts[(src, dst)] += 1
+    return pair_counts
+
+
+def build_ip_role_summary(pair_counts, internal_net="172.31.0.0/16"):
+    """
+    Build a per-IP summary table from a Counter of (src, dst) attack pairs.
+
+    For each IP that appears in any malicious flow the table records how many
+    unique sources send flows to it, how many unique internal sources do so,
+    how many unique targets it reaches, how many of those are internal, and
+    the raw inbound/outbound flow totals.
+
+    Parameters
+    ----------
+    pair_counts  : Counter — output of count_attack_ip_pairs
+    internal_net : str — CIDR of the internal network
+
+    Returns
+    -------
+    pd.DataFrame sorted by total_inbound descending, with columns:
+        IP, is_internal, unique_sources, unique_internal_sources,
+        unique_targets, unique_internal_targets, total_inbound, total_outbound
+    """
+    net = ipaddress.ip_network(internal_net)
+
+    def _is_internal(ip):
+        try:
+            return ipaddress.ip_address(str(ip)) in net
+        except ValueError:
+            return False
+
+    all_ips = {ip for pair in pair_counts for ip in pair}
+    rows = []
+    for ip in all_ips:
+        inbound  = {(s, d): c for (s, d), c in pair_counts.items() if d == ip}
+        outbound = {(s, d): c for (s, d), c in pair_counts.items() if s == ip}
+
+        rows.append({
+            "IP":                       ip,
+            "is_internal":              _is_internal(ip),
+            "unique_sources":           len({s for s, _ in inbound}),
+            "unique_internal_sources":  len({s for s, _ in inbound if _is_internal(s)}),
+            "unique_targets":           len({d for _, d in outbound}),
+            "unique_internal_targets":  len({d for _, d in outbound if _is_internal(d)}),
+            "total_inbound":            sum(inbound.values()),
+            "total_outbound":           sum(outbound.values()),
+        })
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("total_inbound", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def classify_attack_roles(df_summary,
+                          min_sources_c2=5,
+                          min_internal_sources_c2=1,
+                          min_outbound_attacker=100):
+    """
+    Derive C2-server and external-attacker IP lists from the role summary table.
+
+    Classification rules (applied only to external IPs):
+    - C2 server      : unique_sources >= min_sources_c2
+                       OR unique_internal_sources >= min_internal_sources_c2
+    - Ext. attacker  : total_outbound >= min_outbound_attacker  (and not a C2)
+
+    Parameters
+    ----------
+    df_summary              : pd.DataFrame — output of build_ip_role_summary
+    min_sources_c2          : int
+    min_internal_sources_c2 : int
+    min_outbound_attacker   : int
+
+    Returns
+    -------
+    (c2_servers, external_attackers) — two lists of IP strings
+    """
+    ext = df_summary[~df_summary["is_internal"]].copy()
+
+    c2_mask = (
+        (ext["unique_sources"] >= min_sources_c2) |
+        (ext["unique_internal_sources"] >= min_internal_sources_c2)
+    )
+    c2_servers        = ext[c2_mask]["IP"].tolist()
+    external_attackers = (
+        ext[~c2_mask & (ext["total_outbound"] >= min_outbound_attacker)]["IP"].tolist()
+    )
+    return c2_servers, external_attackers
