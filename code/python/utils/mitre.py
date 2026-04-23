@@ -520,23 +520,30 @@ def build_ip_role_summary(pair_counts, internal_net="172.31.0.0/16"):
 
 
 def classify_attack_roles(df_summary,
-                          min_sources_c2=5,
-                          min_internal_sources_c2=1,
-                          min_outbound_attacker=100):
+                          min_total_inbound_c2=5000,
+                          min_unique_sources_c2=5,
+                          min_total_outbound_attacker=1000):
     """
     Derive C2-server and external-attacker IP lists from the role summary table.
 
     Classification rules (applied only to external IPs):
-    - C2 server      : unique_sources >= min_sources_c2
-                       OR unique_internal_sources >= min_internal_sources_c2
-    - Ext. attacker  : total_outbound >= min_outbound_attacker  (and not a C2)
+
+    C2 server — an IP that receives BOTH:
+      * total_inbound  >= min_total_inbound_c2   (sustained high-volume inbound traffic)
+      * unique_sources >= min_unique_sources_c2  (connections from multiple distinct hosts)
+    The AND requirement rules out two failure modes:
+      - Legitimate CDN/cloud servers: many sources but few flows each → low total_inbound
+      - One-sided C2 infrastructure: high volume from a single attacker → low unique_sources
+
+    External attacker — an external IP with total_outbound >= min_total_outbound_attacker
+    that does not qualify as a C2 server.
 
     Parameters
     ----------
-    df_summary              : pd.DataFrame — output of build_ip_role_summary
-    min_sources_c2          : int
-    min_internal_sources_c2 : int
-    min_outbound_attacker   : int
+    df_summary                 : pd.DataFrame — output of build_ip_role_summary
+    min_total_inbound_c2       : int — minimum total inbound malicious flows  (default 5000)
+    min_unique_sources_c2      : int — minimum distinct source IPs             (default 5)
+    min_total_outbound_attacker: int — minimum total outbound malicious flows  (default 1000)
 
     Returns
     -------
@@ -545,11 +552,11 @@ def classify_attack_roles(df_summary,
     ext = df_summary[~df_summary["is_internal"]].copy()
 
     c2_mask = (
-        (ext["unique_sources"] >= min_sources_c2) |
-        (ext["unique_internal_sources"] >= min_internal_sources_c2)
+        (ext["total_inbound"]  >= min_total_inbound_c2) &
+        (ext["unique_sources"] >= min_unique_sources_c2)
     )
-    c2_servers        = ext[c2_mask]["IP"].tolist()
+    c2_servers         = ext[c2_mask]["IP"].tolist()
     external_attackers = (
-        ext[~c2_mask & (ext["total_outbound"] >= min_outbound_attacker)]["IP"].tolist()
+        ext[~c2_mask & (ext["total_outbound"] >= min_total_outbound_attacker)]["IP"].tolist()
     )
     return c2_servers, external_attackers
