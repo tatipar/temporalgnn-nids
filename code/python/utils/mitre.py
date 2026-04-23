@@ -549,7 +549,16 @@ def classify_attack_roles(df_summary,
     -------
     (c2_servers, external_attackers) — two lists of IP strings
     """
-    ext = df_summary[~df_summary["is_internal"]].copy()
+    def _is_non_routable(ip):
+        try:
+            a = ipaddress.ip_address(str(ip))
+            return a.is_link_local or a.is_loopback
+        except ValueError:
+            return False
+
+    ext = df_summary[
+        ~df_summary["is_internal"] & ~df_summary["IP"].map(_is_non_routable)
+    ].copy()
 
     c2_mask = (
         (ext["total_inbound"]  >= min_total_inbound_c2) &
