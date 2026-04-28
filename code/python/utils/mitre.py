@@ -369,7 +369,7 @@ def analyze_all_lateral_movements_pairs(df_tp, time_window_sec=30, ignore_unknow
         candidate = df[
             ((df["Source_IP"] == src) | (df["Dest_IP"] == src) |
              (df["Source_IP"] == dst) | (df["Dest_IP"] == dst)) &
-            (df["Graph_Window_Idx"] <= first_lm_idx)
+            (df["Graph_Window_Idx"] < first_lm_idx)
         ]
         if ignore_unknown:
             candidate = candidate[candidate["MITRE_Tactic_Base"] != "Unknown"]
@@ -392,7 +392,7 @@ def analyze_all_lateral_movements_pairs(df_tp, time_window_sec=30, ignore_unknow
             if dst_in_early:
                 trigger_ip.append(f"Victim_LM ({dst})")
 
-                attacks_received   = early_warnings[early_warnings["Dest_IP"] == dst]
+                attacks_received    = early_warnings[early_warnings["Dest_IP"] == dst]
                 connections_started = early_warnings[early_warnings["Source_IP"] == dst]
 
                 if not attacks_received.empty:
@@ -409,6 +409,7 @@ def analyze_all_lateral_movements_pairs(df_tp, time_window_sec=30, ignore_unknow
             results.append({
                 "LM_Source":            src,
                 "LM_Dest":              dst,
+                "Had_Prior_Alert":      True,
                 "First_Alert_Min":      first_alert_idx * time_window_sec / 60.0,
                 "Alert_Caused_By":      " and ".join(trigger_ip),
                 "Forensic_Detail":      alert_detail,
@@ -416,17 +417,35 @@ def analyze_all_lateral_movements_pairs(df_tp, time_window_sec=30, ignore_unknow
                 "Lateral_Movement_Min": first_lm_idx * time_window_sec / 60.0,
                 "Lead_Time_Min":        lead_time_min
             })
+        else:
+            results.append({
+                "LM_Source":            src,
+                "LM_Dest":              dst,
+                "Had_Prior_Alert":      False,
+                "First_Alert_Min":      None,
+                "Alert_Caused_By":      "",
+                "Forensic_Detail":      "",
+                "Early_Warning_Tactic": None,
+                "Lateral_Movement_Min": first_lm_idx * time_window_sec / 60.0,
+                "Lead_Time_Min":        None
+            })
 
     df_results = pd.DataFrame(results)
 
     if not df_results.empty:
-        avg_lead_time = df_results["Lead_Time_Min"].mean()
-        print(f"\n Global Average Lead Time (per pair): {avg_lead_time:.1f} minutes")
-        print("\n Top Tactics That Gave Early Warning:")
-        print(df_results["Early_Warning_Tactic"].value_counts().to_string())
+        n_with    = df_results["Had_Prior_Alert"].sum()
+        n_total   = len(df_results)
+        print(f"\n Early-warning coverage: {n_with}/{n_total} LM pairs had a prior alert.")
+        with_prior = df_results[df_results["Had_Prior_Alert"]]
+        if not with_prior.empty:
+            print(f" Lead time — min: {with_prior['Lead_Time_Min'].min():.1f} min  "
+                  f"mean: {with_prior['Lead_Time_Min'].mean():.1f} min  "
+                  f"max: {with_prior['Lead_Time_Min'].max():.1f} min")
+            print("\n Top Tactics That Gave Early Warning:")
+            print(with_prior["Early_Warning_Tactic"].value_counts().to_string())
         print("\n")
 
-    return df_results.sort_values("Lead_Time_Min", ascending=False)
+    return df_results.sort_values("Lead_Time_Min", ascending=False, na_position="last")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
