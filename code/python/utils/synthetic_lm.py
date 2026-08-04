@@ -638,8 +638,12 @@ def _event_from_donor(
             "Event_Role": role,
             "Assumed_Success": stage_code in (STAGE_LATERAL_MOVEMENT, STAGE_CONFIRMATION),
             "Donor_Row_ID": int(donor["_raw_row_id"]),
+            "Donor_Original_Attack": str(donor["Attack"]),
+            "Donor_Original_Source_IP": str(donor["IPV4_SRC_ADDR"]),
+            "Donor_Original_Dest_IP": str(donor["IPV4_DST_ADDR"]),
             "Donor_Original_Port": int(donor["L4_DST_PORT"]),
             "Donor_Port_Category": int(donor["_port_category"]),
+            "Linked_Attack_Event_ID": event_id,
             "window_id": window_id_for_time(start_time, global_start),
         }
     )
@@ -759,9 +763,13 @@ def _select_control_sources(
     internal = relevant_flows[
         relevant_flows["_src_internal"] & relevant_flows["_dst_internal"]
     ]
-    candidates = pd.concat(
-        [internal["IPV4_SRC_ADDR"].astype(str), internal["IPV4_DST_ADDR"].astype(str)]
-    ).value_counts()
+    candidates = internal["IPV4_SRC_ADDR"].astype(str).value_counts()
+    if "Attack" in internal.columns:
+        attack_label = internal["Attack"].astype(str).str.strip().str.lower()
+        non_benign_sources = set(
+            internal.loc[~attack_label.eq("benign"), "IPV4_SRC_ADDR"].astype(str)
+        )
+        forbidden |= non_benign_sources
     candidates = [ip for ip in candidates.index if ip in ip_to_id and ip not in forbidden]
     if len(candidates) < count:
         raise SyntheticLMError(f"Need {count} unrelated control sources; found {len(candidates)}")
@@ -773,57 +781,77 @@ def create_matched_controls(
     scenarios: pd.DataFrame,
     relevant_flows: pd.DataFrame,
     ip_to_id: Mapping[str, int],
+    controls_per_attack: int = 3,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Create nine endpoint-permuted benign controls at the 15-minute horizon."""
+    """Create endpoint-permuted controls for every attack scenario.
 
-    reference = scenarios[
-        scenarios["horizon_minutes"].eq(15)
-        & scenarios["access_path"].eq("valid_account")
-    ].sort_values(["protocol", "target_ip"])
-    if len(reference) != 9:
-        raise SyntheticLMError(f"Expected nine matched-control references, found {len(reference)}")
+    Each attack is repeated with several unrelated internal source hosts.  The
+    flow features, ports, target, and timestamps stay unchanged so that the
+    paired comparison isolates endpoint identity, temporal state, and graph
+    placement.  ``Benign`` remains a constructed control label, not verified
+    administrative ground truth.
+    """
+
+    if controls_per_attack < 1:
+        raise SyntheticLMError("controls_per_attack must be at least one")
+    reference = scenarios[scenarios["scenario_type"].eq("attack")].sort_values(
+        ["protocol", "target_ip", "horizon_minutes", "access_path"]
+    )
+    if reference.empty:
+        raise SyntheticLMError("No attack scenarios are available for matched controls")
 
     forbidden = set(scenarios["pivot_ip"]) | set(scenarios["target_ip"]) | {DEFAULT_ATTACKER_IP}
     control_sources = _select_control_sources(
-        relevant_flows, ip_to_id, forbidden_ips=forbidden, count=len(reference)
+        relevant_flows,
+        ip_to_id,
+        forbidden_ips=forbidden,
+        count=int(controls_per_attack),
     )
 
     control_scenarios: List[dict] = []
     control_flows: List[pd.DataFrame] = []
-    for control_index, ((_, attack_scenario), control_source) in enumerate(
-        zip(reference.iterrows(), control_sources), start=1
-    ):
+    for _, attack_scenario in reference.iterrows():
         linked_id = str(attack_scenario["scenario_id"])
-        control_id = f"control_{control_index:02d}_{linked_id}"
-        scenario_row = attack_scenario.to_dict()
-        scenario_row.update(
-            {
-                "scenario_id": control_id,
-                "scenario_type": "control",
-                "linked_attack_scenario": linked_id,
-                "pivot_ip": control_source,
-            }
-        )
-        control_scenarios.append(scenario_row)
+        linked_flows = synthetic_flows[synthetic_flows["Scenario_ID"].eq(linked_id)].copy()
+        if linked_flows.empty:
+            raise SyntheticLMError(f"No synthetic flows found for attack scenario {linked_id}")
+        for replicate, control_source in enumerate(control_sources, start=1):
+            control_id = f"control_r{replicate:02d}_{linked_id}"
+            scenario_row = attack_scenario.to_dict()
+            scenario_row.update(
+                {
+                    "scenario_id": control_id,
+                    "scenario_type": "control",
+                    "linked_attack_scenario": linked_id,
+                    "pivot_ip": control_source,
+                    "control_replicate": int(replicate),
+                    "control_source_ip": control_source,
+                }
+            )
+            control_scenarios.append(scenario_row)
 
-        copied = synthetic_flows[synthetic_flows["Scenario_ID"].eq(linked_id)].copy()
-        copied["Scenario_ID"] = control_id
-        copied["Scenario_Type"] = "control"
-        copied["Pivot_IP"] = control_source
-        copied.loc[
-            copied["IPV4_SRC_ADDR"].eq(str(attack_scenario["pivot_ip"])),
-            "IPV4_SRC_ADDR",
-        ] = control_source
-        copied["Attack"] = "Benign"
-        copied["Synthetic_Stage"] = "Benign remote-service control"
-        copied["Synthetic_Stage_ID"] = STAGE_CONTROL
-        copied["ATTACK_Technique"] = ""
-        copied["ATTACK_Technique_Name"] = "Matched endpoint-permutation control"
-        copied["Assumed_Success"] = False
-        copied["Synthetic_Event_ID"] = [
-            f"{control_id}:{index:03d}" for index in range(len(copied))
-        ]
-        control_flows.append(copied)
+            copied = linked_flows.copy()
+            copied["Linked_Attack_Event_ID"] = copied["Synthetic_Event_ID"].astype(str)
+            copied["Linked_Attack_Scenario"] = linked_id
+            copied["Control_Replicate"] = int(replicate)
+            copied["Control_Source_IP"] = control_source
+            copied["Scenario_ID"] = control_id
+            copied["Scenario_Type"] = "control"
+            copied["Pivot_IP"] = control_source
+            copied.loc[
+                copied["IPV4_SRC_ADDR"].eq(str(attack_scenario["pivot_ip"])),
+                "IPV4_SRC_ADDR",
+            ] = control_source
+            copied["Attack"] = "Benign"
+            copied["Synthetic_Stage"] = "Benign remote-service control"
+            copied["Synthetic_Stage_ID"] = STAGE_CONTROL
+            copied["ATTACK_Technique"] = ""
+            copied["ATTACK_Technique_Name"] = "Matched endpoint-permutation control"
+            copied["Assumed_Success"] = False
+            copied["Synthetic_Event_ID"] = [
+                f"{control_id}:{index:03d}" for index in range(len(copied))
+            ]
+            control_flows.append(copied)
 
     controls = pd.concat(control_flows, ignore_index=True)
     control_manifest = pd.DataFrame(control_scenarios)
@@ -895,6 +923,73 @@ def validate_synthetic_flows(
                 scenario["lm_time"]
             ):
                 add("lm_onset_mismatch", "First LM flow does not equal declared onset", scenario_id)
+
+        control_scenarios = scenarios[scenarios["scenario_type"].eq("control")]
+        if not control_scenarios.empty:
+            provenance_required = {"Linked_Attack_Event_ID", "Linked_Attack_Scenario"}
+            provenance_missing = sorted(provenance_required - set(flows.columns))
+            if provenance_missing:
+                add("missing_control_provenance", str(provenance_missing))
+            else:
+                attack_flows = flows[flows["Scenario_Type"].eq("attack")].copy()
+                controls = flows[flows["Scenario_Type"].eq("control")].copy()
+                linked_ids = set(attack_flows["Synthetic_Event_ID"].astype(str))
+                missing_links = controls.loc[
+                    ~controls["Linked_Attack_Event_ID"].astype(str).isin(linked_ids),
+                    "Linked_Attack_Event_ID",
+                ].unique()
+                if len(missing_links):
+                    add("missing_linked_attack_event", str(missing_links[:10].tolist()))
+
+                comparison_columns = [
+                    *NUMERIC_FEATURES,
+                    "FLOW_START_TIME",
+                    "IPV4_DST_ADDR",
+                    "L4_DST_PORT",
+                    "PROTOCOL",
+                    "Donor_Row_ID",
+                    "Event_Role",
+                ]
+                attack_reference = attack_flows[
+                    ["Synthetic_Event_ID", *comparison_columns]
+                ].rename(columns={"Synthetic_Event_ID": "Linked_Attack_Event_ID"})
+                paired = controls.merge(
+                    attack_reference,
+                    on="Linked_Attack_Event_ID",
+                    how="left",
+                    suffixes=("_control", "_attack"),
+                    validate="many_to_one",
+                )
+                for column in comparison_columns:
+                    control_values = paired[f"{column}_control"]
+                    attack_values = paired[f"{column}_attack"]
+                    if column == "FLOW_START_TIME":
+                        equal = pd.to_datetime(control_values).eq(pd.to_datetime(attack_values))
+                    else:
+                        equal = control_values.eq(attack_values)
+                    if not bool(equal.fillna(False).all()):
+                        add(
+                            "control_feature_mismatch",
+                            f"Matched controls changed {column}",
+                        )
+                        break
+
+                expected_counts = attack_flows.groupby("Scenario_ID").size()
+                actual_counts = controls.groupby("Scenario_ID").size()
+                linked_by_control = control_scenarios.set_index("scenario_id")[
+                    "linked_attack_scenario"
+                ]
+                for control_id, count in actual_counts.items():
+                    linked_id = linked_by_control.get(control_id)
+                    if linked_id not in expected_counts or int(count) != int(
+                        expected_counts[linked_id]
+                    ):
+                        add(
+                            "control_flow_count_mismatch",
+                            f"Control has {count} flows; linked attack has "
+                            f"{expected_counts.get(linked_id, 'missing')}",
+                            str(control_id),
+                        )
 
     report = pd.DataFrame(issues, columns=["Scenario_ID", "Code", "Detail"])
     if raise_on_error and not report.empty:
@@ -1284,6 +1379,66 @@ def _prediction_rows(
     return rows
 
 
+def _remove_original_focus_edges(
+    graph,
+    focus_ips: Iterable[str],
+    id_to_ip: Mapping[int, str],
+):
+    """Remove original edges incident to focus hosts while retaining synthetic edges.
+
+    This is an inference-only current-window context ablation.  It changes both
+    the local graph and the original flows available to node aggregation, so it
+    must not be interpreted as a pure causal estimate of graph topology.
+    """
+
+    graph = copy.deepcopy(graph)
+    edge_count = int(graph.edge_index.shape[1])
+    if edge_count == 0:
+        return graph
+    focus_ips = set(map(str, focus_ips))
+    source, dest = _edge_endpoint_ips(graph, id_to_ip)
+    synthetic = getattr(
+        graph,
+        "synthetic_mask",
+        torch.zeros(edge_count, dtype=torch.bool, device=graph.edge_index.device),
+    ).bool()
+    incident = torch.tensor(
+        [src in focus_ips or dst in focus_ips for src, dst in zip(source, dest)],
+        dtype=torch.bool,
+        device=graph.edge_index.device,
+    )
+    keep = synthetic | ~incident
+    if bool(keep.all()):
+        return graph
+
+    graph.edge_index = graph.edge_index[:, keep]
+    for name in (
+        "edge_attr",
+        "y",
+        "synthetic_mask",
+        "synthetic_stage_id",
+        "synthetic_start_time_ms",
+        "synthetic_available_time_ms",
+    ):
+        value = getattr(graph, name, None)
+        if torch.is_tensor(value) and value.shape[0] == edge_count:
+            setattr(graph, name, value[keep.to(value.device)])
+
+    keep_list = keep.detach().cpu().tolist()
+    for name in (
+        "synthetic_event_ids",
+        "synthetic_scenario_ids",
+        "synthetic_stage_names",
+        "synthetic_techniques",
+        "synthetic_roles",
+    ):
+        value = getattr(graph, name, None)
+        if isinstance(value, list) and len(value) == edge_count:
+            setattr(graph, name, [item for item, retain in zip(value, keep_list) if retain])
+    graph.is_empty = graph.edge_index.shape[1] == 0
+    return graph
+
+
 def collect_base_context_and_snapshots(
     model,
     model_name: str,
@@ -1349,14 +1504,23 @@ def collect_scenario_predictions(
     device: str | torch.device,
     temporal: bool,
     memory_snapshot: Optional[Mapping[int, torch.Tensor]] = None,
+    ablation_mode: str = "full",
 ) -> pd.DataFrame:
     """Evaluate only the short modified interval for one scenario."""
 
     device = torch.device(device)
+    allowed_modes = {"full", "reset_memory", "remove_focus_context"}
+    if ablation_mode not in allowed_modes:
+        raise SyntheticLMError(f"Unknown diagnostic ablation mode: {ablation_mode}")
     if temporal:
-        if memory_snapshot is None:
+        if ablation_mode != "reset_memory" and memory_snapshot is None:
             raise SyntheticLMError("Temporal scenario evaluation requires a base-memory snapshot")
-        restore_node_memory(model, memory_snapshot, device)
+        if ablation_mode == "reset_memory":
+            model.reset_memory()
+        else:
+            restore_node_memory(model, memory_snapshot, device)
+    elif ablation_mode == "reset_memory":
+        raise SyntheticLMError("reset_memory is only defined for temporal models")
     model.eval()
     rows: List[dict] = []
     focus_ips = {str(scenario["pivot_ip"]), str(scenario["target_ip"])}
@@ -1366,6 +1530,8 @@ def collect_scenario_predictions(
     with torch.no_grad():
         for index in range(start_index, end_index + 1):
             graph = dataset[index].to(device)
+            if ablation_mode == "remove_focus_context":
+                graph = _remove_original_focus_edges(graph, focus_ips, id_to_ip)
             if graph.x.shape[0] == 0:
                 continue
             logits = _forward_model(model, graph, temporal).view(-1)
@@ -1392,7 +1558,9 @@ def collect_scenario_predictions(
                     keep,
                 )
             )
-    return pd.DataFrame(rows)
+    frame = pd.DataFrame(rows)
+    frame["Diagnostic_Ablation"] = ablation_mode
+    return frame
 
 
 def evaluate_model_scenarios(
@@ -1407,8 +1575,13 @@ def evaluate_model_scenarios(
     device: str | torch.device,
     temporal: bool,
     split: str = "test2",
+    ablation_modes: Sequence[str] = ("full",),
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Evaluate one fixed champion efficiently across all attack/control overlays."""
+    """Evaluate one fixed champion efficiently across attack/control overlays.
+
+    Non-full diagnostic ablations are evaluated for attack scenarios only.
+    Base inference and temporal snapshots are still computed once per model.
+    """
 
     base_dataset = SyntheticOverlayDataset(base_graph_root, split=split)
     snapshot_windows = sorted(set(scenario_manifest["first_window"].astype(int)))
@@ -1431,18 +1604,21 @@ def evaluate_model_scenarios(
             overlay_root=Path(overlay_root, str(scenario["scenario_id"])),
             split=split,
         )
-        frame = collect_scenario_predictions(
-            model=model,
-            model_name=model_name,
-            threshold=threshold,
-            dataset=scenario_dataset,
-            id_to_ip=id_to_ip,
-            scenario=scenario,
-            device=device,
-            temporal=temporal,
-            memory_snapshot=snapshots.get(int(scenario["first_window"])),
-        )
-        scenario_results.append(frame)
+        modes = tuple(ablation_modes) if scenario["scenario_type"] == "attack" else ("full",)
+        for ablation_mode in modes:
+            frame = collect_scenario_predictions(
+                model=model,
+                model_name=model_name,
+                threshold=threshold,
+                dataset=scenario_dataset,
+                id_to_ip=id_to_ip,
+                scenario=scenario,
+                device=device,
+                temporal=temporal,
+                memory_snapshot=snapshots.get(int(scenario["first_window"])),
+                ablation_mode=ablation_mode,
+            )
+            scenario_results.append(frame)
 
     combined = pd.concat(scenario_results, ignore_index=True) if scenario_results else pd.DataFrame()
     return base_events, combined
@@ -1593,12 +1769,15 @@ def summarize_experiment(
 
     attack_manifest = scenario_manifest[scenario_manifest["scenario_type"].eq("attack")]
     control_manifest = scenario_manifest[scenario_manifest["scenario_type"].eq("control")]
+    full_predictions = scenario_predictions
+    if "Diagnostic_Ablation" in full_predictions.columns:
+        full_predictions = full_predictions[full_predictions["Diagnostic_Ablation"].eq("full")]
     attack_rows: List[dict] = []
     control_rows: List[dict] = []
 
-    for model_name in sorted(scenario_predictions["Model"].unique()):
+    for model_name in sorted(full_predictions["Model"].unique()):
         model_base = base_events[base_events["Model"].eq(model_name)]
-        model_predictions = scenario_predictions[scenario_predictions["Model"].eq(model_name)]
+        model_predictions = full_predictions[full_predictions["Model"].eq(model_name)]
 
         for _, scenario in attack_manifest.iterrows():
             part = model_predictions[model_predictions["Scenario_ID"].eq(scenario["scenario_id"])]
@@ -1614,11 +1793,25 @@ def summarize_experiment(
                 if "Campaign_GT" in model_base.columns
                 else model_base["y_real"].eq(1)
             )
+            same_pivot = model_base["Source_IP"].astype(str).eq(
+                str(scenario["pivot_ip"])
+            ) | model_base["Dest_IP"].astype(str).eq(str(scenario["pivot_ip"]))
             original = model_base[
                 campaign_mask
+                & same_pivot
                 & model_base["y_pred"].eq(1)
                 & (pd.to_datetime(model_base["Operational_Available_Time"]) < pd.Timestamp(scenario["lm_time"]))
             ]
+            first_original = (
+                pd.to_datetime(original["Operational_Available_Time"]).min()
+                if not original.empty
+                else pd.NaT
+            )
+            first_auth = (
+                pd.to_datetime(auth["Operational_Available_Time"]).min()
+                if not auth.empty
+                else pd.NaT
+            )
             precursor_times = pd.concat(
                 [
                     pd.to_datetime(original["Operational_Available_Time"]),
@@ -1633,6 +1826,7 @@ def summarize_experiment(
                 else np.nan
             )
             detected_lm = lm[lm["y_pred"].eq(1)]
+            lm_flow_positive_rate = float(lm["y_pred"].mean()) if not lm.empty else np.nan
             first_lm_alert = (
                 pd.to_datetime(detected_lm["Operational_Available_Time"]).min()
                 if not detected_lm.empty
@@ -1653,6 +1847,7 @@ def summarize_experiment(
                     "Access_Path": scenario["access_path"],
                     "Synthetic_LM_Flows": len(lm),
                     "Synthetic_LM_Detected_Flows": int(lm["y_pred"].sum()),
+                    "Synthetic_LM_Flow_Positive_Rate": lm_flow_positive_rate,
                     "Synthetic_LM_Detected": bool(lm["y_pred"].any()) if not lm.empty else False,
                     "First_Operational_LM_Alert": first_lm_alert,
                     "LM_Detection_Delay_Minutes": lm_detection_delay,
@@ -1663,10 +1858,23 @@ def summarize_experiment(
                         else "binary_attack_label_only"
                     ),
                     "Synthetic_Auth_Precursor_Detected": not auth.empty,
+                    "First_Operational_Original_Precursor": first_original,
+                    "First_Operational_Synthetic_Auth_Precursor": first_auth,
+                    "Precursor_Warning_Source": (
+                        "both"
+                        if not original.empty and not auth.empty
+                        else "original_campaign"
+                        if not original.empty
+                        else "synthetic_authentication"
+                        if not auth.empty
+                        else "none"
+                    ),
                     "Precursor_Warning": pd.notna(first_precursor),
                     "First_Operational_Precursor": first_precursor,
                     "Operational_Lead_Minutes": lead,
                     "Lead_At_Least_5_Minutes": bool(pd.notna(lead) and lead >= 5),
+                    "End_To_End_Detected": bool(pd.notna(first_precursor) and not detected_lm.empty),
+                    "Same_Pivot_Precursor_Enforced": True,
                 }
             )
 
@@ -1681,6 +1889,8 @@ def summarize_experiment(
                     "Model": model_name,
                     "Scenario_ID": control["scenario_id"],
                     "Linked_Attack_Scenario": control["linked_attack_scenario"],
+                    "Control_Replicate": int(control.get("control_replicate", 1)),
+                    "Control_Source_IP": str(control.get("control_source_ip", control["pivot_ip"])),
                     "Protocol": control["protocol"],
                     "Target_IP": control["target_ip"],
                     "Synthetic_Control_Flows": len(part),
@@ -1692,11 +1902,211 @@ def summarize_experiment(
     return pd.DataFrame(attack_rows), pd.DataFrame(control_rows)
 
 
+def build_paired_diagnostics(
+    scenario_predictions: pd.DataFrame,
+    synthetic_flows: pd.DataFrame,
+) -> pd.DataFrame:
+    """Match every full linked LM decision to each endpoint-permuted control."""
+
+    predictions = scenario_predictions
+    if "Diagnostic_Ablation" in predictions.columns:
+        predictions = predictions[predictions["Diagnostic_Ablation"].eq("full")]
+    predictions = predictions[
+        predictions["Is_Synthetic"] & predictions["Synthetic_Role"].eq("synthetic_lm")
+    ].copy()
+    metadata_columns = [
+        "Synthetic_Event_ID",
+        "Scenario_ID",
+        "Scenario_Type",
+        "Linked_Attack_Event_ID",
+        "Protocol_Mechanism",
+        "Access_Path",
+        "Horizon_Minutes",
+        "Target_IP",
+        "Donor_Row_ID",
+        "Donor_Original_Attack",
+    ]
+    optional = [
+        column
+        for column in ("Linked_Attack_Scenario", "Control_Replicate", "Control_Source_IP")
+        if column in synthetic_flows.columns
+    ]
+    missing = sorted(set(metadata_columns) - set(synthetic_flows.columns))
+    if missing:
+        raise SyntheticLMError(f"Synthetic-flow provenance is missing paired fields: {missing}")
+    metadata = synthetic_flows[metadata_columns + optional].drop_duplicates("Synthetic_Event_ID")
+    enriched = predictions.merge(
+        metadata,
+        on=["Synthetic_Event_ID", "Scenario_ID"],
+        how="left",
+        validate="many_to_one",
+    )
+    if enriched["Scenario_Type"].isna().any():
+        raise SyntheticLMError("Some synthetic predictions have no flow provenance")
+
+    attack = enriched[enriched["Scenario_Type"].eq("attack")].copy()
+    attack = attack.rename(
+        columns={
+            "Scenario_ID": "Attack_Scenario_ID",
+            "Synthetic_Event_ID": "Attack_Event_ID",
+            "Probability": "Linked_Probability",
+            "y_pred": "Linked_Prediction",
+            "Source_IP": "Linked_Source_IP",
+        }
+    )
+    attack_columns = [
+        "Model",
+        "Linked_Attack_Event_ID",
+        "Attack_Scenario_ID",
+        "Attack_Event_ID",
+        "Linked_Source_IP",
+        "Linked_Probability",
+        "Linked_Prediction",
+        "Protocol_Mechanism",
+        "Access_Path",
+        "Horizon_Minutes",
+        "Target_IP",
+        "Donor_Row_ID",
+        "Donor_Original_Attack",
+    ]
+    attack = attack[attack_columns]
+
+    controls = enriched[enriched["Scenario_Type"].eq("control")].copy()
+    controls = controls.rename(
+        columns={
+            "Scenario_ID": "Control_Scenario_ID",
+            "Synthetic_Event_ID": "Control_Event_ID",
+            "Probability": "Control_Probability",
+            "y_pred": "Control_Prediction",
+            "Source_IP": "Control_Source_IP_Observed",
+        }
+    )
+    control_columns = [
+        "Model",
+        "Linked_Attack_Event_ID",
+        "Control_Scenario_ID",
+        "Control_Event_ID",
+        "Control_Source_IP_Observed",
+        "Control_Probability",
+        "Control_Prediction",
+    ]
+    for column in ("Control_Replicate", "Control_Source_IP"):
+        if column in controls.columns:
+            control_columns.append(column)
+    paired = controls[control_columns].merge(
+        attack,
+        on=["Model", "Linked_Attack_Event_ID"],
+        how="left",
+        validate="many_to_one",
+    )
+    if paired["Attack_Event_ID"].isna().any():
+        raise SyntheticLMError("At least one control prediction has no linked attack prediction")
+    paired["Probability_Delta_Linked_Minus_Control"] = (
+        paired["Linked_Probability"] - paired["Control_Probability"]
+    )
+    paired["Paired_Outcome"] = np.select(
+        [
+            paired["Linked_Prediction"].eq(1) & paired["Control_Prediction"].eq(1),
+            paired["Linked_Prediction"].eq(1) & paired["Control_Prediction"].eq(0),
+            paired["Linked_Prediction"].eq(0) & paired["Control_Prediction"].eq(1),
+        ],
+        ["both_positive", "linked_only", "control_only"],
+        default="both_negative",
+    )
+    return paired.sort_values(
+        ["Model", "Attack_Scenario_ID", "Linked_Attack_Event_ID", "Control_Scenario_ID"]
+    ).reset_index(drop=True)
+
+
+def summarize_paired_diagnostics(
+    paired: pd.DataFrame,
+    strata: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Aggregate paired endpoint-control decisions overall or by fixed strata."""
+
+    group_columns = ["Model", *strata]
+    frame = paired.copy()
+    frame["Linked_Only"] = frame["Paired_Outcome"].eq("linked_only")
+    frame["Control_Only"] = frame["Paired_Outcome"].eq("control_only")
+    frame["Both_Positive"] = frame["Paired_Outcome"].eq("both_positive")
+    return (
+        frame.groupby(group_columns, dropna=False, as_index=False)
+        .agg(
+            Paired_Comparisons=("Paired_Outcome", "size"),
+            Linked_Positive_Rate=("Linked_Prediction", "mean"),
+            Control_Positive_Rate=("Control_Prediction", "mean"),
+            Mean_Probability_Delta=("Probability_Delta_Linked_Minus_Control", "mean"),
+            Median_Probability_Delta=("Probability_Delta_Linked_Minus_Control", "median"),
+            Linked_Only=("Linked_Only", "sum"),
+            Control_Only=("Control_Only", "sum"),
+            Both_Positive=("Both_Positive", "sum"),
+        )
+        .sort_values(group_columns)
+        .reset_index(drop=True)
+    )
+
+
+def summarize_diagnostic_ablations(
+    scenario_predictions: pd.DataFrame,
+    scenario_manifest: pd.DataFrame,
+) -> pd.DataFrame:
+    """Summarize attack-only fixed-checkpoint memory/context ablations."""
+
+    if "Diagnostic_Ablation" not in scenario_predictions.columns:
+        return pd.DataFrame()
+    attack_ids = set(
+        scenario_manifest.loc[scenario_manifest["scenario_type"].eq("attack"), "scenario_id"]
+    )
+    lm = scenario_predictions[
+        scenario_predictions["Scenario_ID"].isin(attack_ids)
+        & scenario_predictions["Is_Synthetic"]
+        & scenario_predictions["Synthetic_Role"].eq("synthetic_lm")
+    ].copy()
+    per_scenario = (
+        lm.groupby(["Model", "Diagnostic_Ablation", "Scenario_ID"], as_index=False)
+        .agg(
+            LM_Detected=("y_pred", "max"),
+            LM_Flow_Positive_Rate=("y_pred", "mean"),
+            Mean_LM_Probability=("Probability", "mean"),
+        )
+    )
+    summary = (
+        per_scenario.groupby(["Model", "Diagnostic_Ablation"], as_index=False)
+        .agg(
+            Scenarios=("Scenario_ID", "nunique"),
+            LM_Coverage=("LM_Detected", "mean"),
+            Scenario_Macro_LM_Flow_Positive_Rate=("LM_Flow_Positive_Rate", "mean"),
+            Mean_LM_Probability=("Mean_LM_Probability", "mean"),
+        )
+    )
+    full = summary[summary["Diagnostic_Ablation"].eq("full")][
+        ["Model", "LM_Coverage", "Mean_LM_Probability"]
+    ].rename(
+        columns={
+            "LM_Coverage": "Full_LM_Coverage",
+            "Mean_LM_Probability": "Full_Mean_LM_Probability",
+        }
+    )
+    summary = summary.merge(full, on="Model", how="left", validate="many_to_one")
+    summary["LM_Coverage_Delta_From_Full"] = summary["LM_Coverage"] - summary["Full_LM_Coverage"]
+    summary["Mean_Probability_Delta_From_Full"] = (
+        summary["Mean_LM_Probability"] - summary["Full_Mean_LM_Probability"]
+    )
+    return summary.sort_values(["Model", "Diagnostic_Ablation"]).reset_index(drop=True)
+
+
+def count_trainable_parameters(model) -> int:
+    """Return the number of trainable parameters for operational comparison."""
+
+    return int(sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad))
+
+
 def apply_diagnostic_gate(
     attack_summary: pd.DataFrame,
     control_summary: pd.DataFrame,
     lm_coverage_threshold: float = 0.70,
     warning_coverage_threshold: float = 0.70,
+    end_to_end_coverage_threshold: float = 0.70,
     lead_threshold_minutes: float = 5.0,
     control_advantage_threshold: float = 0.10,
 ) -> pd.DataFrame:
@@ -1719,11 +2129,16 @@ def apply_diagnostic_gate(
         )
         advantage = linked_rate - control_rate if pd.notna(linked_rate) and pd.notna(control_rate) else np.nan
 
+        linked_macro_rate = float(linked["Synthetic_LM_Flow_Positive_Rate"].mean())
+        control_macro_rate = float(controls["Control_Positive_Rate"].mean())
+        macro_advantage = linked_macro_rate - control_macro_rate
+
         lm_coverage = float(part["Synthetic_LM_Detected"].mean())
         warning_coverage = float(part["Precursor_Warning"].mean())
+        end_to_end_coverage = float(part["End_To_End_Detected"].mean())
         median_lead = float(part["Operational_Lead_Minutes"].median())
         protocol_target_coverage = (
-            part[part["Precursor_Warning"]]
+            part[part["End_To_End_Detected"]]
             .groupby("Protocol")["Target_IP"]
             .nunique()
         )
@@ -1732,22 +2147,27 @@ def apply_diagnostic_gate(
         passes = (
             lm_coverage >= lm_coverage_threshold
             and warning_coverage >= warning_coverage_threshold
+            and end_to_end_coverage >= end_to_end_coverage_threshold
             and median_lead >= lead_threshold_minutes
             and protocols_with_two_targets >= 2
             and graph_or_temporal
-            and pd.notna(advantage)
-            and advantage >= control_advantage_threshold
+            and pd.notna(macro_advantage)
+            and macro_advantage >= control_advantage_threshold
         )
         rows.append(
             {
                 "Model": model_name,
                 "LM_Coverage": lm_coverage,
                 "Warning_Coverage": warning_coverage,
+                "End_To_End_Coverage": end_to_end_coverage,
                 "Median_Operational_Lead_Minutes": median_lead,
-                "Protocols_With_At_Least_2_Targets": protocols_with_two_targets,
+                "Protocols_With_At_Least_2_End_To_End_Targets": protocols_with_two_targets,
                 "Linked_LM_Flow_Positive_Rate": linked_rate,
                 "Control_Flow_Positive_Rate": control_rate,
                 "Linked_Control_Advantage": advantage,
+                "Linked_Scenario_Macro_Positive_Rate": linked_macro_rate,
+                "Control_Scenario_Macro_Positive_Rate": control_macro_rate,
+                "Scenario_Macro_Control_Advantage": macro_advantage,
                 "Passes_Robust_Diagnostic_Gate": bool(passes),
             }
         )

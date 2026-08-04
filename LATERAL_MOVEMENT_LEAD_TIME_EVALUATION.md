@@ -374,11 +374,11 @@ The mechanisms are SMB/RPC, RDP, and SSH. Each selected target must first appear
 1. Credentials assumed to have been obtained previously, followed directly by a remote-service session.
 2. Eight completed authentication-attempt flows before the remote-service session.
 
-Each synthetic numeric vector is copied as a complete 20-feature vector from an empirical Day-2 donor. This preserves correlations between bytes, packets, duration, IATs, flags, windows, and TTL values. Endpoints, timestamps, service port, label, and provenance are then assigned according to the synthetic scenario. If exact-port or same-category donor support is insufficient, the protocol fails preflight rather than using arbitrary independent random values.
+Each synthetic numeric vector is copied as a complete 20-feature vector from an empirical Day-2 donor. This preserves correlations between bytes, packets, duration, IATs, flags, windows, and TTL values. Donors can be benign or attack-labelled: the resulting counterfactual is assigned to an attack scenario because of its assumed endpoint, time, service, and role in the constructed sequence, not because its numeric vector is inherently malicious. The original donor label and endpoints are retained as provenance. If exact-port or same-category donor support is insufficient, the protocol fails preflight rather than using arbitrary independent random values.
 
 The first remote-service flow is the declared synthetic LM onset. A target-originated external connection 60 seconds later acts only as constructed confirmation. Neither event proves actual authentication or execution because the experiment contains aggregate flows rather than packet or host telemetry.
 
-Nine endpoint-permuted benign controls reuse the same flow features and timestamps with an unrelated source host. These controls help distinguish responses to flow/port features from responses to campaign-linked topology or temporal host state. In particular, the MLP should be invariant to endpoint permutation because it does not consume endpoint identity or graph topology.
+Every attack scenario now has three endpoint-permuted controls, for 162 controls in total. Each control reuses the linked attack's flow features, target, service, and timestamps while substituting one of three internal source hosts with no retained attack-labelled source activity. These are constructed benign controls, not verified administrative sessions. They help distinguish responses to flow/port features from responses to campaign-linked endpoint identity, topology, or temporal host state. The notebook produces an exact paired probability table; the MLP must remain invariant because it does not consume endpoint identity or graph topology.
 
 The experiment uses operational availability:
 
@@ -386,7 +386,9 @@ The experiment uses operational availability:
 t_available = max(30-second window end, flow start + flow duration)
 ```
 
-Original precursor alerts are restricted to the corrected notebook's documented campaign event IDs. Synthetic authentication alerts are reported separately. A model passes the predeclared diagnostic gate only when it reaches the required LM coverage, precursor coverage, operational lead, protocol/target breadth, and advantage over matched controls.
+Original precursor alerts are restricted to corrected documented campaign event IDs that explicitly involve the same pivot used by the later synthetic movement. Synthetic authentication alerts and warning provenance are reported separately. The revised gate requires LM coverage, same-pivot precursor coverage, joint precursor-plus-LM coverage, operational lead, end-to-end protocol/target breadth, and scenario-macro advantage over the full control set. Results are also stratified by protocol, horizon, access path, and donor label.
+
+For the temporal models, two fixed-checkpoint sensitivity ablations are reported. `reset_memory` removes pre-scenario temporal state. `remove_focus_context` retains memory but removes original current-window edges involving the pivot or target. The latter changes both graph structure and the local flow context; neither ablation is a causal proof of topology because the checkpoints were not trained under the intervention.
 
 A passing result means that a fixed model reacts coherently to the constructed aggregate-flow sequence. It remains a sensitivity result and must not be presented as validation on real lateral movement. A failed preflight or failed diagnostic gate is the decision point for moving to a chain-labelled dataset.
 

@@ -7,4 +7,4 @@ A temporal graph neural network approach for network intrusion detection using G
 - [Evaluation, dataset requirements, and interpretation guidance](LATERAL_MOVEMENT_LEAD_TIME_EVALUATION.md)
 - [Colab synthetic lateral-movement experiment](code/python/notebook/synthetic_lateral_movement_experiment.ipynb)
 
-The synthetic experiment uses sparse aggregate-flow overlays and the existing fixed checkpoints. It is a diagnostic sensitivity study, not a replacement for evaluation on captured, verified lateral movement.
+The synthetic experiment uses sparse aggregate-flow overlays and the existing fixed checkpoints. Its v2 analysis pairs all 54 attack scenarios with multiple endpoint controls, separates warning provenance, and reports temporal/context ablations and model cost. It is a diagnostic sensitivity study, not a replacement for evaluation on captured, verified lateral movement.

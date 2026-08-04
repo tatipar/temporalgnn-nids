@@ -20,8 +20,10 @@ from utils.synthetic_lm import (  # noqa: E402
     SyntheticOverlayDataset,
     append_synthetic_edges,
     assert_overlay_preserves_base,
+    build_paired_diagnostics,
     build_edge_attr,
     build_scenario_matrix,
+    create_matched_controls,
     get_port_role_vector,
     get_protocol_vector,
     operational_availability,
@@ -184,3 +186,145 @@ def test_mlp_is_invariant_to_endpoint_permutation():
         output_a = model(x_a, edge_index_a, edge_attr)
         output_b = model(x_b, edge_index_b, edge_attr)
     torch.testing.assert_close(output_a, output_b)
+
+
+def test_controls_cover_every_attack_with_multiple_sources():
+    scenarios = pd.DataFrame(
+        [
+            {
+                "scenario_id": "attack_a",
+                "scenario_type": "attack",
+                "protocol": "SSH",
+                "pivot_ip": "172.31.69.13",
+                "target_ip": "172.31.69.7",
+                "horizon_minutes": 5,
+                "access_path": "valid_account",
+            },
+            {
+                "scenario_id": "attack_b",
+                "scenario_type": "attack",
+                "protocol": "RDP",
+                "pivot_ip": "172.31.69.13",
+                "target_ip": "172.31.69.14",
+                "horizon_minutes": 30,
+                "access_path": "authentication_attempts",
+            },
+        ]
+    )
+    attack_flows = pd.DataFrame(
+        [
+            _flow_row(
+                Scenario_ID="attack_a",
+                Synthetic_Event_ID="attack_a:000",
+                Linked_Attack_Event_ID="attack_a:000",
+                Scenario_Type="attack",
+                Protocol_Mechanism="SSH",
+                Access_Path="valid_account",
+                Horizon_Minutes=5,
+                Target_IP="172.31.69.7",
+            ),
+            _flow_row(
+                Scenario_ID="attack_b",
+                Synthetic_Event_ID="attack_b:000",
+                Linked_Attack_Event_ID="attack_b:000",
+                Scenario_Type="attack",
+                Protocol_Mechanism="RDP",
+                Access_Path="authentication_attempts",
+                Horizon_Minutes=30,
+                Target_IP="172.31.69.14",
+                IPV4_DST_ADDR="172.31.69.14",
+            ),
+        ]
+    )
+    relevant = pd.DataFrame(
+        {
+            "IPV4_SRC_ADDR": ["172.31.10.1", "172.31.10.2", "172.31.10.3"],
+            "IPV4_DST_ADDR": ["172.31.20.1", "172.31.20.1", "172.31.20.1"],
+            "_src_internal": [True, True, True],
+            "_dst_internal": [True, True, True],
+            "Attack": ["Infilteration", "Benign", "Benign"],
+        }
+    )
+    ip_to_id = {
+        "172.31.10.1": 1,
+        "172.31.10.2": 2,
+        "172.31.10.3": 3,
+        "172.31.20.1": 4,
+    }
+    controls, manifest = create_matched_controls(
+        attack_flows,
+        scenarios,
+        relevant,
+        ip_to_id,
+        controls_per_attack=2,
+    )
+    assert len(manifest) == 4
+    assert manifest.groupby("linked_attack_scenario").size().eq(2).all()
+    assert len(controls) == 4
+    assert set(controls["Linked_Attack_Event_ID"]) == {"attack_a:000", "attack_b:000"}
+    assert controls["Attack"].eq("Benign").all()
+    assert not controls["IPV4_SRC_ADDR"].eq("172.31.69.13").any()
+    assert not controls["IPV4_SRC_ADDR"].eq("172.31.10.1").any()
+
+
+def test_paired_diagnostics_match_identical_event_provenance():
+    attack = _flow_row(
+        Scenario_ID="attack_a",
+        Synthetic_Event_ID="attack_a:000",
+        Linked_Attack_Event_ID="attack_a:000",
+        Scenario_Type="attack",
+        Protocol_Mechanism="SSH",
+        Access_Path="valid_account",
+        Horizon_Minutes=15,
+        Target_IP="172.31.69.7",
+        Donor_Row_ID=123,
+        Donor_Original_Attack="Benign",
+    )
+    controls = []
+    for replicate, prediction in ((1, 0), (2, 1)):
+        row = dict(attack)
+        row.update(
+            {
+                "Scenario_ID": f"control_r{replicate:02d}_attack_a",
+                "Synthetic_Event_ID": f"control_r{replicate:02d}_attack_a:000",
+                "Scenario_Type": "control",
+                "Linked_Attack_Scenario": "attack_a",
+                "Control_Replicate": replicate,
+                "Control_Source_IP": f"172.31.10.{replicate}",
+                "_prediction": prediction,
+            }
+        )
+        controls.append(row)
+    flows = pd.DataFrame([attack, *controls]).drop(columns="_prediction")
+    prediction_rows = [
+        {
+            "Model": "ST-GNN",
+            "Synthetic_Event_ID": "attack_a:000",
+            "Scenario_ID": "attack_a",
+            "Is_Synthetic": True,
+            "Synthetic_Role": "synthetic_lm",
+            "Probability": 0.8,
+            "y_pred": 1,
+            "Source_IP": "172.31.69.13",
+            "Diagnostic_Ablation": "full",
+        }
+    ]
+    for replicate, prediction in ((1, 0), (2, 1)):
+        prediction_rows.append(
+            {
+                "Model": "ST-GNN",
+                "Synthetic_Event_ID": f"control_r{replicate:02d}_attack_a:000",
+                "Scenario_ID": f"control_r{replicate:02d}_attack_a",
+                "Is_Synthetic": True,
+                "Synthetic_Role": "synthetic_lm",
+                "Probability": 0.2 if prediction == 0 else 0.7,
+                "y_pred": prediction,
+                "Source_IP": f"172.31.10.{replicate}",
+                "Diagnostic_Ablation": "full",
+            }
+        )
+    paired = build_paired_diagnostics(pd.DataFrame(prediction_rows), flows)
+    assert len(paired) == 2
+    assert set(paired["Paired_Outcome"]) == {"linked_only", "both_positive"}
+    assert paired["Linked_Probability"].eq(0.8).all()
+    assert set(paired["Control_Probability"]) == {0.2, 0.7}
