@@ -18,6 +18,7 @@ if str(PYTHON_ROOT) not in sys.path:
 from utils.synthetic_lm import (  # noqa: E402
     NUMERIC_FEATURES,
     SyntheticOverlayDataset,
+    _select_control_sources,
     append_synthetic_edges,
     assert_overlay_preserves_base,
     build_paired_diagnostics,
@@ -265,6 +266,42 @@ def test_controls_cover_every_attack_with_multiple_sources():
     assert controls["Attack"].eq("Benign").all()
     assert not controls["IPV4_SRC_ADDR"].eq("172.31.69.13").any()
     assert not controls["IPV4_SRC_ADDR"].eq("172.31.10.1").any()
+    assert manifest["control_source_selection_tier"].eq("benign_only_source").all()
+
+
+def test_control_selection_falls_back_when_all_sources_have_native_attack_labels():
+    relevant = pd.DataFrame(
+        {
+            "IPV4_SRC_ADDR": [
+                "172.31.10.1",
+                "172.31.10.1",
+                "172.31.10.2",
+                "172.31.10.3",
+            ],
+            "IPV4_DST_ADDR": ["172.31.20.1"] * 4,
+            "_src_internal": [True] * 4,
+            "_dst_internal": [True] * 4,
+            "Attack": ["Infilteration"] * 4,
+        }
+    )
+    selected = _select_control_sources(
+        relevant,
+        ip_to_id={
+            "172.31.10.1": 1,
+            "172.31.10.2": 2,
+            "172.31.10.3": 3,
+            "172.31.20.1": 4,
+        },
+        forbidden_ips={"172.31.20.1"},
+        count=3,
+    )
+    assert selected["Control_Source_IP"].tolist() == [
+        "172.31.10.1",
+        "172.31.10.2",
+        "172.31.10.3",
+    ]
+    assert selected["Selection_Tier"].eq("lowest_attack_rate_source").all()
+    assert selected["Retained_Native_Attack_Rate"].eq(1.0).all()
 
 
 def test_paired_diagnostics_match_identical_event_provenance():

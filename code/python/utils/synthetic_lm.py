@@ -758,22 +758,109 @@ def _select_control_sources(
     ip_to_id: Mapping[str, int],
     forbidden_ips: Iterable[str],
     count: int,
-) -> List[str]:
+) -> pd.DataFrame:
+    """Rank mapped internal endpoints for endpoint-permutation controls.
+
+    A native Day-2 attack label is useful provenance, but it is not a reliable
+    host-level exclusion rule: the broad ``Infilteration`` interval can mark
+    every retained flow from an otherwise usable endpoint.  Prefer sources
+    whose retained source flows are all benign, then fall back to sources with
+    the lowest native attack-label rate.  A mapped internal endpoint seen only
+    as a destination is the final fallback.
+
+    The returned statistics make that choice auditable.  They do *not* turn a
+    selected endpoint into verified benign ground truth; the generated rows
+    remain constructed endpoint-permutation controls.
+    """
+
     forbidden = set(map(str, forbidden_ips))
-    internal = relevant_flows[
+    internal = relevant_flows.loc[
         relevant_flows["_src_internal"] & relevant_flows["_dst_internal"]
-    ]
-    candidates = internal["IPV4_SRC_ADDR"].astype(str).value_counts()
+    ].copy()
+    if internal.empty:
+        raise SyntheticLMError(
+            "No internal-to-internal flows are available for control selection"
+        )
+
+    internal["_control_src_ip"] = internal["IPV4_SRC_ADDR"].astype(str)
+    internal["_control_dst_ip"] = internal["IPV4_DST_ADDR"].astype(str)
+    source_counts = internal["_control_src_ip"].value_counts()
+    destination_counts = internal["_control_dst_ip"].value_counts()
+    endpoint_ips = sorted(set(source_counts.index) | set(destination_counts.index))
+    statistics = pd.DataFrame({"Control_Source_IP": endpoint_ips})
+    statistics["Retained_Source_Flows"] = (
+        statistics["Control_Source_IP"].map(source_counts).fillna(0).astype(int)
+    )
+    statistics["Retained_Destination_Flows"] = (
+        statistics["Control_Source_IP"].map(destination_counts).fillna(0).astype(int)
+    )
+
     if "Attack" in internal.columns:
         attack_label = internal["Attack"].astype(str).str.strip().str.lower()
-        non_benign_sources = set(
-            internal.loc[~attack_label.eq("benign"), "IPV4_SRC_ADDR"].astype(str)
+        benign_counts = internal.loc[
+            attack_label.eq("benign"), "_control_src_ip"
+        ].value_counts()
+        attack_counts = internal.loc[
+            ~attack_label.eq("benign"), "_control_src_ip"
+        ].value_counts()
+        statistics["Retained_Benign_Source_Flows"] = (
+            statistics["Control_Source_IP"].map(benign_counts).fillna(0).astype(int)
         )
-        forbidden |= non_benign_sources
-    candidates = [ip for ip in candidates.index if ip in ip_to_id and ip not in forbidden]
-    if len(candidates) < count:
-        raise SyntheticLMError(f"Need {count} unrelated control sources; found {len(candidates)}")
-    return candidates[:count]
+        statistics["Retained_Native_Attack_Source_Flows"] = (
+            statistics["Control_Source_IP"].map(attack_counts).fillna(0).astype(int)
+        )
+    else:
+        statistics["Retained_Benign_Source_Flows"] = 0
+        statistics["Retained_Native_Attack_Source_Flows"] = 0
+
+    source_denominator = statistics["Retained_Source_Flows"].replace(0, np.nan)
+    statistics["Retained_Native_Attack_Rate"] = (
+        statistics["Retained_Native_Attack_Source_Flows"] / source_denominator
+    )
+    statistics["Selection_Tier"] = np.select(
+        [
+            statistics["Retained_Source_Flows"].gt(0)
+            & statistics["Retained_Benign_Source_Flows"].gt(0)
+            & statistics["Retained_Native_Attack_Source_Flows"].eq(0),
+            statistics["Retained_Source_Flows"].gt(0),
+        ],
+        ["benign_only_source", "lowest_attack_rate_source"],
+        default="destination_only_endpoint",
+    )
+    tier_rank = {
+        "benign_only_source": 0,
+        "lowest_attack_rate_source": 1,
+        "destination_only_endpoint": 2,
+    }
+    statistics["_tier_rank"] = statistics["Selection_Tier"].map(tier_rank)
+    statistics["_attack_rate_rank"] = statistics[
+        "Retained_Native_Attack_Rate"
+    ].fillna(1.0)
+    eligible = statistics[
+        statistics["Control_Source_IP"].isin(set(map(str, ip_to_id)))
+        & ~statistics["Control_Source_IP"].isin(forbidden)
+    ].copy()
+    eligible = eligible.sort_values(
+        [
+            "_tier_rank",
+            "_attack_rate_rank",
+            "Retained_Benign_Source_Flows",
+            "Retained_Source_Flows",
+            "Retained_Destination_Flows",
+            "Control_Source_IP",
+        ],
+        ascending=[True, True, False, False, False, True],
+        kind="stable",
+    )
+    if len(eligible) < count:
+        raise SyntheticLMError(
+            f"Need {count} mapped internal control endpoints after excluding the pivot, "
+            f"attacker, and synthetic targets; found {len(eligible)} "
+            f"({len(statistics)} internal endpoints before exclusions)"
+        )
+    selected = eligible.head(count).copy()
+    selected["Control_Source_Rank"] = np.arange(1, len(selected) + 1, dtype=int)
+    return selected.drop(columns=["_tier_rank", "_attack_rate_rank"]).reset_index(drop=True)
 
 
 def create_matched_controls(
@@ -785,11 +872,11 @@ def create_matched_controls(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Create endpoint-permuted controls for every attack scenario.
 
-    Each attack is repeated with several unrelated internal source hosts.  The
-    flow features, ports, target, and timestamps stay unchanged so that the
-    paired comparison isolates endpoint identity, temporal state, and graph
-    placement.  ``Benign`` remains a constructed control label, not verified
-    administrative ground truth.
+    Each attack is repeated with several campaign-unrelated internal
+    endpoints.  The flow features, ports, target, and timestamps stay
+    unchanged so that the paired comparison isolates endpoint identity,
+    temporal state, and graph placement.  ``Benign`` remains a constructed
+    control label, not verified administrative ground truth.
     """
 
     if controls_per_attack < 1:
@@ -815,7 +902,10 @@ def create_matched_controls(
         linked_flows = synthetic_flows[synthetic_flows["Scenario_ID"].eq(linked_id)].copy()
         if linked_flows.empty:
             raise SyntheticLMError(f"No synthetic flows found for attack scenario {linked_id}")
-        for replicate, control_source in enumerate(control_sources, start=1):
+        for replicate, source_details in enumerate(
+            control_sources.to_dict("records"), start=1
+        ):
+            control_source = str(source_details["Control_Source_IP"])
             control_id = f"control_r{replicate:02d}_{linked_id}"
             scenario_row = attack_scenario.to_dict()
             scenario_row.update(
@@ -826,6 +916,23 @@ def create_matched_controls(
                     "pivot_ip": control_source,
                     "control_replicate": int(replicate),
                     "control_source_ip": control_source,
+                    "control_source_selection_tier": source_details["Selection_Tier"],
+                    "control_source_rank": int(source_details["Control_Source_Rank"]),
+                    "control_source_retained_source_flows": int(
+                        source_details["Retained_Source_Flows"]
+                    ),
+                    "control_source_retained_destination_flows": int(
+                        source_details["Retained_Destination_Flows"]
+                    ),
+                    "control_source_retained_benign_source_flows": int(
+                        source_details["Retained_Benign_Source_Flows"]
+                    ),
+                    "control_source_retained_native_attack_source_flows": int(
+                        source_details["Retained_Native_Attack_Source_Flows"]
+                    ),
+                    "control_source_retained_native_attack_rate": source_details[
+                        "Retained_Native_Attack_Rate"
+                    ],
                 }
             )
             control_scenarios.append(scenario_row)
@@ -835,6 +942,11 @@ def create_matched_controls(
             copied["Linked_Attack_Scenario"] = linked_id
             copied["Control_Replicate"] = int(replicate)
             copied["Control_Source_IP"] = control_source
+            copied["Control_Source_Selection_Tier"] = source_details["Selection_Tier"]
+            copied["Control_Source_Rank"] = int(source_details["Control_Source_Rank"])
+            copied["Control_Source_Retained_Native_Attack_Rate"] = source_details[
+                "Retained_Native_Attack_Rate"
+            ]
             copied["Scenario_ID"] = control_id
             copied["Scenario_Type"] = "control"
             copied["Pivot_IP"] = control_source
