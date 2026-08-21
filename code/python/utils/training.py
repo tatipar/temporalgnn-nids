@@ -278,6 +278,8 @@ def run_multiple_seeds(model_class, model_config, train_loader, val_loader,
     print(f"   Seeds: {seeds}")
     print("-" * 60)
 
+    all_thresholds = {}
+
     for seed in seeds:
         t0_seed = time.perf_counter()
         t_train_total = 0.0
@@ -358,6 +360,7 @@ def run_multiple_seeds(model_class, model_config, train_loader, val_loader,
         best_th, _, _ = find_optimal_threshold(
             model, val_loader, device, is_temporal, min_precision=0.90
         )
+        all_thresholds[f"seed_{seed}"] = best_th
         t_threshold_total += time.perf_counter() - t0
 
         # Compute all metrics
@@ -419,6 +422,12 @@ def run_multiple_seeds(model_class, model_config, train_loader, val_loader,
 
         print(f"\n End seed {seed}")
         print("-" * 60)
+
+    # Save thresholds for all seeds to .npz (preserves full float precision)
+    npz_path = os.path.join(json_dir, experiment_name,
+                            f"thresholds_{experiment_name}.npz")
+    np.savez(npz_path, **all_thresholds)
+    print(f"\nThresholds saved: {npz_path}")
 
     # Print summary statistics across all seeds
     df = pd.read_csv(manager.log_file)

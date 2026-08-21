@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, LayerNorm as GraphLayerNorm
+from torch_geometric.nn import MessagePassing
 
 
 # ===========================================================================
@@ -216,6 +217,169 @@ class StaticGNN_biasinit(nn.Module):
         return self.classifier(edge_rep)
 
 
+# ===========================================================================
+# EXTERNAL BASELINE
+# ===========================================================================
+
+class EdgeGRU_Baseline_NoX(nn.Module):
+    """
+    Temporal baseline without node features.
+
+    Encodes only edge_attr (no dummy node vectors), then aggregates per
+    source node and updates a per-node GRU hidden state across windows.
+    This is the clean "time-only" ablation: temporal memory without any
+    graph-convolution or node-feature signal.
+
+    Forward: (x, edge_index, edge_attr, global_node_ids)
+    x is accepted for interface compatibility but not used in computation.
+    """
+
+    def __init__(self, edge_dim, hidden_dim, dropout, output_bias_init=None, node_dim=None):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.node_memory = {}
+
+        self.encoder = nn.Sequential(
+            nn.Linear(edge_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU()
+        )
+
+        self.gru = nn.GRUCell(hidden_dim, hidden_dim)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(2 * hidden_dim + edge_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1)
+        )
+
+        if output_bias_init is not None:
+            self.classifier[-1].bias.data.fill_(output_bias_init)
+
+    def manual_scatter_mean(self, src, index, dim_size):
+        out = torch.zeros((dim_size, src.size(1)), device=src.device)
+        out.index_add_(0, index, src)
+        ones = torch.ones(src.size(0), 1, device=src.device)
+        count = torch.zeros(dim_size, 1, device=src.device)
+        count.index_add_(0, index, ones)
+        count[count < 1] = 1
+        return out / count
+
+    def detach_all_memory(self):
+        for k, v in self.node_memory.items():
+            self.node_memory[k] = v.detach()
+
+    def reset_memory(self):
+        self.node_memory = {}
+
+    def forward(self, x, edge_index, edge_attr, global_node_ids):
+        device = x.device
+        num_nodes_batch = x.size(0)
+
+        src, dst = edge_index
+
+        encoded_features = self.encoder(edge_attr)
+
+        global_ids_list = global_node_ids.tolist()
+        h_prev = torch.zeros(num_nodes_batch, self.hidden_dim, device=device)
+        for i, gid in enumerate(global_ids_list):
+            if gid in self.node_memory:
+                h_prev[i] = self.node_memory[gid]
+
+        aggr_input = self.manual_scatter_mean(encoded_features, src, dim_size=num_nodes_batch)
+        h_new = self.gru(aggr_input, h_prev)
+
+        h_new_stored = h_new.clone()
+        for i, gid in enumerate(global_ids_list):
+            self.node_memory[gid] = h_new_stored[i]
+
+        edge_representation = torch.cat([h_new[src], h_new[dst], edge_attr], dim=1)
+        return self.classifier(edge_representation)
+
+
+# ===========================================================================
+# EXTERNAL BASELINE
+# ===========================================================================
+
+class _ESAGEConv(MessagePassing):
+    """
+    Single E-GraphSAGE layer (Lo et al. 2022, Algorithm 1).
+
+    Message:     each edge sends its own features e_uv (no neighbor node embedding).
+    Aggregation: mean of incident edge features at node v.
+    Update:      Linear(concat(h_v, mean_edges)) → ReLU.
+
+    Linear input is in_channels + edge_dim because the aggregated vector
+    has size edge_dim (edge features only, not neighbor embeddings).
+    """
+
+    def __init__(self, in_channels, out_channels, edge_dim):
+        super().__init__(aggr='mean', flow='source_to_target')
+        self.lin = nn.Linear(in_channels + edge_dim, out_channels)
+
+    def forward(self, x, edge_index, edge_attr):
+        n = x.size(0)
+        aggr = self.propagate(edge_index, x=x, edge_attr=edge_attr, size=(n, n))
+        return F.relu(self.lin(torch.cat([x, aggr], dim=1)))
+
+    def message(self, edge_attr):
+        return edge_attr
+
+    def update(self, aggr_out, x=None):
+        return aggr_out
+
+
+class E_GraphSAGE(nn.Module):
+    """
+    E-GraphSAGE adapted for edge (flow) classification.
+
+    Message passing follows Lo et al. 2022 (Alg. 1): aggregates incident
+    edge features without including neighbor node embeddings.
+    Classifier: concat(h_src, h_dst, edge_attr) → MLP, following
+    Chang & Branco 2021 (arXiv:2111.13597) to preserve edge features
+    that are diluted during aggregation. hidden_dim=32 for equal-capacity
+    comparison.
+
+    Forward: (x, edge_index, edge_attr) — non-temporal, no global_node_ids.
+    """
+
+    def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None):
+        super().__init__()
+        self.dropout_rate = dropout
+
+        self.sage1 = _ESAGEConv(node_dim,    hidden_dim, edge_dim)
+        self.sage2 = _ESAGEConv(hidden_dim,  hidden_dim, edge_dim)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(2 * hidden_dim + edge_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+        if output_bias_init is not None:
+            self.classifier[-1].bias.data.fill_(output_bias_init)
+
+    def forward(self, x, edge_index, edge_attr):
+        if x.size(0) == 0:
+            return torch.empty((0, 1), device=x.device)
+
+        h = F.dropout(self.sage1(x, edge_index, edge_attr),
+                      p=self.dropout_rate, training=self.training)
+        h = self.sage2(h, edge_index, edge_attr)
+
+        src, dst = edge_index
+        edge_rep = torch.cat([h[src], h[dst], edge_attr], dim=1)
+        return self.classifier(edge_rep)
+
+
 # ---------------------------------------------------------------------------
 # FINAL MODELS
 # ---------------------------------------------------------------------------
@@ -282,80 +446,6 @@ class StaticGNN_Identity(nn.Module):
         x_out = self.manual_scatter_mean(edge_embeddings, src, dim_size=num_nodes)
         x_in  = self.manual_scatter_mean(edge_embeddings, dst, dim_size=num_nodes)
         x_input = torch.cat([x_out, x_in], dim=1)
-
-        # STEP 2: GNN layers
-        h1 = F.dropout(F.elu(self.norm1(self.gnn1(x_input, edge_index, edge_attr=edge_attr))),
-                       p=self.dropout_rate, training=self.training)
-        h2 = F.elu(self.norm2(self.gnn2(h1, edge_index, edge_attr=edge_attr)))
-
-        # STEP 3: Edge classification
-        src, dst = edge_index
-        edge_rep = torch.cat([h2[src], h2[dst], edge_attr], dim=1)
-        return self.classifier(edge_rep)
-
-
-class StaticGNN_Identity_Entropy(nn.Module):
-    """
-    StaticGNN_Identity extended with port-entropy node features.
-    Expects an additional node_stats tensor (shape [num_nodes, 2])
-    containing per-node entropy statistics.
-    """
-
-    def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None):
-        super(StaticGNN_Identity_Entropy, self).__init__()
-
-        self.use_node_stats = True
-        self.hidden_dim = hidden_dim
-        self.dropout_rate = dropout
-
-        self.edge_proj = nn.Linear(edge_dim, node_dim)
-
-        gnn_input_dim = (2 * node_dim) + 2  # +2 for entropy stats
-
-        self.gnn1 = GATv2Conv(
-            in_channels=gnn_input_dim, out_channels=hidden_dim,
-            edge_dim=edge_dim, heads=2, concat=False, dropout=dropout
-        )
-        self.norm1 = GraphLayerNorm(hidden_dim)
-
-        self.gnn2 = GATv2Conv(
-            in_channels=hidden_dim, out_channels=hidden_dim,
-            edge_dim=edge_dim, heads=1, concat=False, dropout=dropout
-        )
-        self.norm2 = GraphLayerNorm(hidden_dim)
-
-        classifier_input_dim = (2 * hidden_dim) + edge_dim
-        self.classifier = nn.Sequential(
-            nn.Linear(classifier_input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1)
-        )
-
-        if output_bias_init is not None:
-            self.classifier[-1].bias.data.fill_(output_bias_init)
-
-    def manual_scatter_mean(self, src, index, dim_size):
-        out = torch.zeros((dim_size, src.size(1)), device=src.device)
-        out.index_add_(0, index, src)
-        ones = torch.ones(src.size(0), 1, device=src.device)
-        count = torch.zeros(dim_size, 1, device=src.device)
-        count.index_add_(0, index, ones)
-        count[count < 1] = 1
-        return out / count
-
-    def forward(self, x, edge_index, edge_attr, node_stats):
-        if x.size(0) == 0: return torch.empty((0, 1), device=x.device)
-
-        # STEP 1: Build node identity + entropy stats
-        edge_embeddings = F.relu(self.edge_proj(edge_attr))
-        src, dst = edge_index
-        num_nodes = x.size(0)
-        x_out = self.manual_scatter_mean(edge_embeddings, src, dim_size=num_nodes)
-        x_in  = self.manual_scatter_mean(edge_embeddings, dst, dim_size=num_nodes)
-        x_input = torch.cat([x_out, x_in, node_stats], dim=1)
 
         # STEP 2: GNN layers
         h1 = F.dropout(F.elu(self.norm1(self.gnn1(x_input, edge_index, edge_attr=edge_attr))),
@@ -685,103 +775,3 @@ class ST_GNN_Identity(nn.Module):
         return self.classifier(edge_rep)
 
 
-class ST_GNN_Identity_Entropy(nn.Module):
-    """
-    ST_GNN_Identity extended with port-entropy node features.
-    Expects an additional node_stats tensor (shape [num_nodes, 2])
-    containing per-node entropy statistics.
-    """
-
-    def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None):
-        super(ST_GNN_Identity_Entropy, self).__init__()
-
-        self.use_node_stats = True
-        self.hidden_dim = hidden_dim
-        self.dropout_rate = dropout
-
-        self.edge_proj = nn.Linear(edge_dim, node_dim)
-
-        gnn_input_dim = (2 * node_dim) + 2  # +2 for entropy stats
-
-        self.gnn1 = GATv2Conv(
-            in_channels=gnn_input_dim, out_channels=hidden_dim,
-            edge_dim=edge_dim, heads=2, concat=False, dropout=dropout
-        )
-        self.norm1 = GraphLayerNorm(hidden_dim)
-
-        self.gnn2 = GATv2Conv(
-            in_channels=hidden_dim, out_channels=hidden_dim,
-            edge_dim=edge_dim, heads=1, concat=False, dropout=dropout
-        )
-        self.norm2 = GraphLayerNorm(hidden_dim)
-
-        self.gru = nn.GRUCell(input_size=hidden_dim, hidden_size=hidden_dim)
-
-        classifier_input_dim = (2 * hidden_dim) + edge_dim
-        self.classifier = nn.Sequential(
-            nn.Linear(classifier_input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1)
-        )
-
-        if output_bias_init is not None:
-            self.classifier[-1].bias.data.fill_(output_bias_init)
-
-        self.node_memory = {}
-
-    def manual_scatter_mean(self, src, index, dim_size):
-        out = torch.zeros((dim_size, src.size(1)), device=src.device)
-        out.index_add_(0, index, src)
-        ones = torch.ones(src.size(0), 1, device=src.device)
-        count = torch.zeros(dim_size, 1, device=src.device)
-        count.index_add_(0, index, ones)
-        count[count < 1] = 1
-        return out / count
-
-    def get_memory(self, ids, device):
-        return torch.stack([
-            self.node_memory.get(i.item(), torch.zeros(self.hidden_dim, device=device))
-            for i in ids
-        ])
-
-    def update_memory(self, ids, h_new):
-        h_stored = h_new.clone()
-        for idx, gid in enumerate(ids):
-            self.node_memory[gid.item()] = h_stored[idx]
-
-    def detach_all_memory(self):
-        for k in self.node_memory:
-            self.node_memory[k] = self.node_memory[k].detach()
-
-    def reset_memory(self):
-        self.node_memory = {}
-
-    def forward(self, x, edge_index, edge_attr, global_ids, node_stats):
-        if x.size(0) == 0: return torch.empty((0, 1), device=x.device)
-
-        # STEP 1: Build node identity + entropy stats
-        edge_embeddings = F.relu(self.edge_proj(edge_attr))
-        src, dst = edge_index
-        num_nodes = x.size(0)
-        x_out = self.manual_scatter_mean(edge_embeddings, src, dim_size=num_nodes)
-        x_in  = self.manual_scatter_mean(edge_embeddings, dst, dim_size=num_nodes)
-        x_input = torch.cat([x_out, x_in, node_stats], dim=1)
-
-        # STEP 2: GNN layers + GRU memory
-        h_prev = self.get_memory(global_ids, x.device)
-
-        z = self.gnn1(x_input, edge_index, edge_attr=edge_attr)
-        z = F.dropout(F.elu(self.norm1(z)), p=self.dropout_rate, training=self.training)
-
-        z = self.gnn2(z, edge_index, edge_attr=edge_attr)
-        z = F.elu(self.norm2(z))
-
-        h_current = self.gru(z, h_prev)
-        self.update_memory(global_ids, h_current)
-
-        # STEP 3: Edge classification
-        edge_rep = torch.cat([h_current[src], h_current[dst], edge_attr], dim=1)
-        return self.classifier(edge_rep)
