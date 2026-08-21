@@ -215,7 +215,24 @@ fails when a model signature and this configuration disagree.
   pass `min_precision` while the strategy remains `max_f1`.
 - When relevant, store both thresholds and state which one produced each metric.
 
-### 4.4 Temporal memory and elapsed time
+### 4.4 Supporting utility modules
+
+The following modules did not differ from the historical branch, but require
+small changes to support the new protocol:
+
+- `metrics.py`: apply predictions with `probs >= threshold`, matching
+  `precision_recall_curve` threshold semantics.
+- `visualization.py`: extend `MODEL_NAME_MAPPING`, model order, and colour
+  mappings for `EdgeGRU_Baseline_NoX` and `E_GraphSAGE`; use one fixed mapping
+  for every comparison figure.
+- `datasets.py`: keep its ordered graph loader, but validate the expected graph
+  schema and optionally assert that timestamps are monotonic before temporal
+  training/evaluation.
+- `experiment.py`: persist the dataset-manifest hash, label-correction version,
+  feature-profile name/hash, temporal-memory policy, and graph/scaler hashes in
+  every run record.
+
+### 4.5 Temporal memory and elapsed time
 
 Per-IP memory must store both hidden state and last observed `decision_time`.
 When retrieving a node state:
@@ -235,7 +252,7 @@ Empty windows need not execute the model: their elapsed time is represented by
 `delta_t` when an IP reappears. Add train/evaluation assertions that timestamps
 never decrease, and record reset counts and gap distributions.
 
-### 4.5 Node identity and the target edge
+### 4.6 Node identity and the target edge
 
 The current identity representation averages incoming/outgoing edge attributes
 from the same window, including the edge being classified. This is not label
