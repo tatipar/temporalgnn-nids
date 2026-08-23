@@ -107,6 +107,9 @@ window_end     = window_start + 30 seconds
 decision_time  = window_end
 ```
 
+Windows are aligned to Unix epoch boundaries (`00` and `30` seconds of each
+minute), not to the first row in a CSV or to a chunk boundary.
+
 The edge is included in the window closing at `decision_time`. For example, a
 flow running from 13:57:00 to 14:03:40 belongs in
 `[14:03:30, 14:04:00)` and is classified at 14:04:00, never in a 13:57 window.
@@ -230,6 +233,11 @@ to the graph collections rather than discarded after serialization. The graph
 manifest records corrected-data and label-manifest hashes, feature-profile and
 scaler hashes, mapping hash, split cutoffs, window policy, row and class counts,
 and graph-file hashes.
+
+Do not serialize empty windows as graph files. Their elapsed time is represented
+by the difference between consecutive non-empty graph timestamps when an IP
+reappears. The builder audit must still verify that a gap produces no duplicate
+or misassigned flow window.
 
 Do not persist an all-ones dummy node-feature matrix. The new graph schema has
 no node attributes: node identity for StaticGNN and ST-GNN is induced from
