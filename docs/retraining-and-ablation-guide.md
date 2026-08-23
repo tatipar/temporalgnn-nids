@@ -184,11 +184,11 @@ stream.
 Define each profile by name and ordered columns, store it as JSON, and use the
 same order for every model.
 
-`nfv3_extended` retains the current 32-dimensional profile:
+`nfv3_extended` retains the enriched 33-dimensional profile:
 
 - 20 numerical features: bytes, packets, duration, IAT, IP lengths,
   retransmissions, TCP windows, flags, and TTL;
-- seven destination-port categories;
+- eight destination-port categories;
 - five protocol categories.
 
 `portable_core` is the first minimal, deployable profile:
@@ -197,11 +197,20 @@ same order for every model.
 - `FLOW_DURATION_MILLISECONDS`;
 - protocol and destination-port category;
 
-It therefore has 17 dimensions: five numerical values, seven destination-port
+It therefore has 18 dimensions: five numerical values, eight destination-port
 categories, and five protocol categories. `TCP_FLAGS` is deliberately excluded
 from this profile: it cannot be reliably reconstructed from the retained flow
 statistics and is not consistently available in compatible exporters. It
 remains an `nfv3_extended` feature only.
+
+The fixed destination-port taxonomy is: `web_http_proxy`, `admin_remote`,
+`windows_smb_rpc`, `infrastructure`, `database`, `other_privileged`,
+`other_high`, and `not_applicable_or_zero`. The final category is reserved for
+destination port zero; it must not be interpreted as a privileged service.
+The schema JSON is authoritative for the explicit port lists in
+each named category. Ports must be valid integers in `0..65535`; protocol
+values must be valid integer IANA protocol numbers in `0..255`. Invalid values
+are data-quality failures, not members of an `other` category.
 
 Generate and store separate graph collections for each profile in the same
 builder run. A profile's JSON schema must record its name, exact ordered

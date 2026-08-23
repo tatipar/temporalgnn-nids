@@ -12,15 +12,23 @@ from utils.graph_schema import NFV3_EXTENDED, PORTABLE_CORE, destination_port_on
 
 class GraphSchemaTests(unittest.TestCase):
     def test_profile_dimensions_are_frozen(self) -> None:
-        self.assertEqual(NFV3_EXTENDED.dimension, 32)
-        self.assertEqual(PORTABLE_CORE.dimension, 17)
+        self.assertEqual(NFV3_EXTENDED.dimension, 33)
+        self.assertEqual(PORTABLE_CORE.dimension, 18)
         self.assertNotIn("TCP_FLAGS", PORTABLE_CORE.numeric_columns)
 
     def test_every_port_and_protocol_gets_one_category(self) -> None:
-        ports = destination_port_one_hot(pd.Series([80, 22, 445, 53, 1433, 25, 49152]))
+        ports = destination_port_one_hot(pd.Series([0, 8081, 5985, 445, 5353, 1521, 25, 49152]))
         protocols = protocol_one_hot(pd.Series([6, 17, 1, 2, 99]))
         self.assertTrue((ports.sum(axis=1) == 1).all())
         self.assertTrue((protocols.sum(axis=1) == 1).all())
+        self.assertEqual(ports.shape[1], 8)
+        self.assertEqual(ports[0].argmax(), 7)
+
+    def test_port_and_protocol_validation_rejects_invalid_values(self) -> None:
+        with self.assertRaises(ValueError):
+            destination_port_one_hot(pd.Series([80.5]))
+        with self.assertRaises(ValueError):
+            protocol_one_hot(pd.Series([17.5]))
 
 
 class TemporalContractTests(unittest.TestCase):

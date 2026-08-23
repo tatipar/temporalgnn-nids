@@ -27,15 +27,37 @@ NUMERIC_PORTABLE_CORE_COLUMNS = (
 )
 
 PORT_CATEGORY_COLUMNS = (
-    "dst_port_web", "dst_port_admin_remote", "dst_port_windows_smb",
-    "dst_port_dns_infrastructure", "dst_port_database",
-    "dst_port_other_privileged", "dst_port_other_high",
+    "dst_port_web_http_proxy", "dst_port_admin_remote", "dst_port_windows_smb_rpc",
+    "dst_port_infrastructure", "dst_port_database", "dst_port_other_privileged",
+    "dst_port_other_high", "dst_port_not_applicable_or_zero",
 )
 
 PROTOCOL_CATEGORY_COLUMNS = (
     "protocol_tcp", "protocol_udp", "protocol_icmp", "protocol_igmp",
     "protocol_other",
 )
+
+WEB_HTTP_PROXY_PORTS = (80, 81, 443, 3128, 8000, 8008, 8080, 8081, 8443, 8545, 8888)
+ADMIN_REMOTE_PORTS = (22, 23, 222, 2222, 2323, 3389, 3390, 3394, 5555, 5900, 5901, 5985, 5986)
+WINDOWS_SMB_RPC_PORTS = (135, 137, 138, 139, 445)
+INFRASTRUCTURE_PORTS = (53, 67, 68, 123, 546, 547, 1900, 5060, 5353, 5355)
+DATABASE_PORTS = (1433, 1434, 1521, 3306, 5432, 6379, 27017)
+
+PORT_ROLE_PORTS = {
+    "dst_port_web_http_proxy": WEB_HTTP_PROXY_PORTS,
+    "dst_port_admin_remote": ADMIN_REMOTE_PORTS,
+    "dst_port_windows_smb_rpc": WINDOWS_SMB_RPC_PORTS,
+    "dst_port_infrastructure": INFRASTRUCTURE_PORTS,
+    "dst_port_database": DATABASE_PORTS,
+}
+
+PROTOCOL_ROLE_VALUES = {
+    "protocol_tcp": (6,),
+    "protocol_udp": (17,),
+    "protocol_icmp": (1, 58),
+    "protocol_igmp": (2,),
+    "protocol_other": "all other valid IANA protocol numbers in 0..255",
+}
 
 
 @dataclass(frozen=True)
@@ -63,8 +85,13 @@ class FeatureProfile:
         payload["protocol_category_columns"] = list(self.protocol_category_columns)
         payload["edge_attr_columns"] = list(self.edge_attr_columns)
         payload["dimension"] = self.dimension
-        payload["port_encoding"] = "seven_fixed_destination_port_roles"
-        payload["protocol_encoding"] = "five_fixed_protocol_roles"
+        payload["port_encoding"] = {
+            "named_roles": {name: list(ports) for name, ports in PORT_ROLE_PORTS.items()},
+            "dst_port_other_privileged": "integer ports 1..1023 outside named roles",
+            "dst_port_other_high": "integer ports 1024..65535 outside named roles",
+            "dst_port_not_applicable_or_zero": "port 0",
+        }
+        payload["protocol_encoding"] = PROTOCOL_ROLE_VALUES
         return payload
 
     def sha256(self) -> str:
@@ -100,6 +127,10 @@ def get_feature_profile(name: str) -> FeatureProfile:
 def protocol_one_hot(values: pd.Series) -> np.ndarray:
     """Encode protocol identifiers as TCP, UDP, ICMP, IGMP, or other."""
     protocol = pd.to_numeric(values, errors="coerce")
+    if protocol.isna().any() or not np.isfinite(protocol).all():
+        raise ValueError("PROTOCOL contains missing, non-numeric, or non-finite values.")
+    if (np.floor(protocol) != protocol).any() or (protocol < 0).any() or (protocol > 255).any():
+        raise ValueError("PROTOCOL must contain integer IANA protocol numbers in the range 0..255.")
     encoded = np.zeros((len(protocol), len(PROTOCOL_CATEGORY_COLUMNS)), dtype=np.float32)
     encoded[:, 4] = 1.0
     encoded[protocol.eq(6).to_numpy(), :] = (1, 0, 0, 0, 0)
@@ -110,24 +141,28 @@ def protocol_one_hot(values: pd.Series) -> np.ndarray:
 
 
 def destination_port_one_hot(values: pd.Series) -> np.ndarray:
-    """Encode destination ports using the fixed seven-role NF-v3 taxonomy."""
+    """Encode destination ports using the fixed eight-role NF-v3 taxonomy."""
     port = pd.to_numeric(values, errors="coerce")
-    if port.isna().any():
-        raise ValueError("L4_DST_PORT contains missing or non-numeric values.")
-    if (port < 0).any() or (port > 65535).any():
-        raise ValueError("L4_DST_PORT contains values outside the valid range 0..65535.")
+    if port.isna().any() or not np.isfinite(port).all():
+        raise ValueError("L4_DST_PORT contains missing, non-numeric, or non-finite values.")
+    if (np.floor(port) != port).any() or (port < 0).any() or (port > 65535).any():
+        raise ValueError("L4_DST_PORT must contain integer values in the valid range 0..65535.")
 
     encoded = np.zeros((len(port), len(PORT_CATEGORY_COLUMNS)), dtype=np.float32)
-    web = port.isin((80, 443, 8080, 8443, 81, 3128, 8545))
-    admin_remote = port.isin((22, 222, 2222, 23, 2323, 3389, 3390, 3394, 5900, 5901, 5555, 21, 2131))
-    windows_smb = port.isin((445, 135, 137, 138, 139))
-    dns_infrastructure = port.isin((53, 5355, 67, 547, 123, 1900, 5060))
-    database = port.isin((1433, 3306, 5432, 6379, 27017))
-    other_privileged = (port < 1024) & ~(web | admin_remote | windows_smb | dns_infrastructure | database)
-    other_high = ~(web | admin_remote | windows_smb | dns_infrastructure | database | other_privileged)
+    web = port.isin(WEB_HTTP_PROXY_PORTS)
+    admin_remote = port.isin(ADMIN_REMOTE_PORTS)
+    windows_smb = port.isin(WINDOWS_SMB_RPC_PORTS)
+    infrastructure = port.isin(INFRASTRUCTURE_PORTS)
+    database = port.isin(DATABASE_PORTS)
+    named_role = web | admin_remote | windows_smb | infrastructure | database
+    other_privileged = (port >= 1) & (port < 1024) & ~named_role
+    other_high = (port >= 1024) & ~named_role
+    not_applicable_or_zero = port.eq(0)
 
-    for index, mask in enumerate((web, admin_remote, windows_smb, dns_infrastructure, database, other_privileged, other_high)):
+    for index, mask in enumerate((web, admin_remote, windows_smb, infrastructure, database, other_privileged, other_high, not_applicable_or_zero)):
         encoded[mask.to_numpy(), index] = 1.0
+    if not (encoded.sum(axis=1) == 1).all():
+        raise AssertionError("Destination-port categories must form an exhaustive one-hot partition.")
     return encoded
 
 
