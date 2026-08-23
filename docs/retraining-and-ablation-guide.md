@@ -93,35 +93,53 @@ scaler, hyperparameters, and results.
 
 ## 3. Temporal contract and graph construction
 
-### 3.1 Edge availability time
+### 3.1 Edge timing and window assignment
 
 The historical builder groups flows by `FLOW_START_TIME`. That is incorrect when
 features include final bytes, packets, duration, or IAT statistics. For each
 row define:
 
 ```text
-flow_start    = FLOW_START_TIME
-flow_end      = flow_start + FLOW_DURATION_MILLISECONDS
-window_end    = end of the first 30-second window containing flow_end
-decision_time = max(flow_end + INFERENCE_LATENCY, window_end)
+flow_start     = FLOW_START_TIME
+flow_end       = flow_start + FLOW_DURATION_MILLISECONDS
+window_start   = start of the 30-second half-open window containing flow_end
+window_end     = window_start + 30 seconds
+decision_time  = window_end
 ```
 
 The edge is included in the window closing at `decision_time`. For example, a
-flow running from 13:57:00 to 14:03:40 with no added latency belongs in
+flow running from 13:57:00 to 14:03:40 belongs in
 `[14:03:30, 14:04:00)` and is classified at 14:04:00, never in a 13:57 window.
+Even if a flow spans several windows, it appears as exactly one edge: in the
+window containing its completion time. Final bytes, packets, duration, and IAT
+statistics are not available before then. With half-open windows, a flow ending
+exactly at 14:04:00 belongs to `[14:04:00, 14:04:30)` and has
+`decision_time = 14:04:30`.
 
 Duration remains a valid feature and retains the existing `log1p` plus scaling
-transformation. Only its availability time changes.
+transformation. Only its graph-assignment time changes.
 
 Persist per-flow provenance in a table or graph metadata:
 
 ```text
-flow_id, source_row_id, flow_start, flow_end, decision_time,
-window_start, window_end, split
+flow_id, source_file, source_row_id, flow_start, flow_end,
+decision_time, window_start, window_end, split
 ```
+
+`flow_id` must be globally unique across all corrected input files. When
+`source_row_id` is only unique within an input file, use the pair
+`(source_file, source_row_id)` as its stable provenance key or derive a
+separate globally unique `flow_id` before graph construction.
 
 `data.timestamp` must represent the decision/window-close time, not only the
 window start.
+
+Do not introduce an assumed inference or serving latency into graph assignment.
+The historical CSVs cannot measure exporter, ingestion, queueing, or alerting
+delay. Report instead `window_wait = decision_time - flow_end` (the delay
+introduced by the 30-second batching policy) and measure model forward-pass
+latency separately on documented hardware. An end-to-end operational latency
+requires a separate streaming or replay study.
 
 ### 3.2 Splits and scaling
 
@@ -133,7 +151,32 @@ window start.
 - Keep 30-second windows initially. Window duration is a separate experiment
   after this protocol has stabilized.
 
-### 3.3 Feature profiles
+### 3.3 IP-to-node-ID mapping contract
+
+Global node IDs are opaque keys for graph-local nodes and temporal memory;
+they are not numerical features, learned IP embeddings, or behavioural labels.
+Their only purpose is to identify a node when it reappears within one temporal
+stream.
+
+- Construct one append-only map for all Day-1 splits (`train`, `val`, and
+  `Test1`) and a separate append-only map for Day 2 (`Test2`). Do not transfer
+  temporal memory between splits or days.
+- Start each day map empty and assign an ID when a valid, canonicalized IP first
+  appears while processing that day's flows in chronological order. Never
+  reuse or reassign an ID. This mirrors online operation without exposing
+  future flow content to an earlier graph.
+- Persist the exact final map used by the builder in both directions
+  (`ip_to_id` and `id_to_ip`), as JSON plus a human-readable two-column table.
+  Record their hashes, entry counts, creation policy, and IP-normalization
+  policy in the graph manifest.
+- Decode an edge only with the map declared by the manifest for that graph
+  collection. Never regenerate a map independently for a later analysis.
+- Canonicalize and validate endpoint addresses before mapping. The manifest
+  must count rows excluded for missing, unparsable, or explicitly disallowed
+  endpoint values (including any policy for `0.0.0.0`); exclusions must never
+  be silent.
+
+### 3.4 Feature profiles
 
 Define each profile by name and ordered columns, store it as JSON, and use the
 same order for every model.
@@ -150,30 +193,80 @@ same order for every model.
 - `IN_BYTES`, `OUT_BYTES`, `IN_PKTS`, `OUT_PKTS`;
 - `FLOW_DURATION_MILLISECONDS`;
 - protocol and destination-port category;
-- `TCP_FLAGS` only if a compatible exporter provides it.
+
+It therefore has 17 dimensions: five numerical values, seven destination-port
+categories, and five protocol categories. `TCP_FLAGS` is deliberately excluded
+from this profile: it cannot be reliably reconstructed from the retained flow
+statistics and is not consistently available in compatible exporters. It
+remains an `nfv3_extended` feature only.
+
+Generate and store separate graph collections for each profile in the same
+builder run. A profile's JSON schema must record its name, exact ordered
+`edge_attr` columns, categorical encoding definitions, transformations,
+dimension, and SHA-256 hash. The schema order, rather than an informal list in
+documentation, is authoritative for every model. Each profile has its own
+train-fitted scaler and scaler hash.
 
 Bytes/s and packets/s may be optional derived features, with explicit handling
 of zero duration. Do not mix CICFlowMeter and NF-v3 extractors within one run:
 adopting CICFlowMeter requires rebuilding all flows and retraining from scratch.
 
-### 3.4 Mandatory automated checks
+### 3.5 Graph artefacts and storage contract
+
+Version graph output directories and keep the profile name explicit, for
+example:
+
+```text
+graphs/<graph_version>/nfv3_extended/{train,val,test1,test2}/
+graphs/<graph_version>/portable_core/{train,val,test1,test2}/
+graphs/<graph_version>/mappings/
+graphs/<graph_version>/manifests/
+```
+
+Each non-empty graph must contain `edge_index`, `edge_attr`, `y`,
+`global_node_ids`, `timestamp`, `window_start`, `window_end`, the feature
+profile name, and the schema hash. The per-flow provenance table is stored next
+to the graph collections rather than discarded after serialization. The graph
+manifest records corrected-data and label-manifest hashes, feature-profile and
+scaler hashes, mapping hash, split cutoffs, window policy, row and class counts,
+and graph-file hashes.
+
+Do not persist an all-ones dummy node-feature matrix. The new graph schema has
+no node attributes: node identity for StaticGNN and ST-GNN is induced from
+edge attributes, while models that require a constant initial state must create
+it internally and document that model policy. This keeps dummy constants from
+being mistaken for input features.
+
+The production builder must be a tested script, with a thin Colab notebook only
+for Drive paths and execution. It must write versioned output, maintain a
+resumable checkpoint/state for long Drive-backed runs, and publish the final
+manifest only after all audits pass. Historical graph-creation and entropy
+notebooks are not valid production builders.
+
+### 3.6 Mandatory automated checks
 
 Implement these both as unit tests and as a graph-builder audit:
 
-- every `source_row_id` occurs in exactly one graph;
-- for every edge, `flow_end <= decision_time <= window_end`, and the assigned
-  window matches the declared decision-time convention;
+- every provenance key and `flow_id` occurs in exactly one graph;
+- for every edge, `flow_end < decision_time`, the flow end belongs to the
+  declared half-open window, and the assigned window closes at
+  `decision_time`;
 - graph timestamps are strictly increasing;
 - splits are disjoint and chronologically ordered by `decision_time`;
 - scaler fitting uses train indices only;
 - feature order/dimensions, `edge_index`, `edge_attr`, and `y` agree;
+- every graph's stored profile/schema hash agrees with its collection manifest;
+- every `global_node_ids` entry resolves through the declared day-specific map,
+  and sampled decoded edge endpoints match the raw provenance rows;
 - no `NaN`, infinity, or invalid `log1p` inputs are present;
 - no label, IP, timestamp, flow ID, or metadata column is used as input;
 - total-flow and positive-flow counts are conserved from corrected CSV through
-  graph splits.
+  graph splits, including documented endpoint exclusions.
 
 Unit-test a short flow, a flow spanning several windows, a flow crossing a split
-cutoff, an empty window, and an IP returning after a long idle period.
+cutoff, an empty window, an IP returning after a long idle period, a new IP
+first appearing in validation or Test1, and source-row identifiers repeated
+across two input files.
 
 ## 4. Fix the training core before final training
 
