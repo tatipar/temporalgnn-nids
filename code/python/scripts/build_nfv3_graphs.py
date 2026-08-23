@@ -21,8 +21,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent))
 from utils.graph_construction import (  # noqa: E402
     DAY1, DAY2, DaySpec, IpIdMap, atomic_json_dump, atomic_torch_save,
-    audit_graph_file, build_graph, fit_scalers, prepare_chunk, required_columns,
-    sha256_file, split_cutoffs, split_for_time,
+    audit_graph_file, build_graph, feature_preflight_audit, fit_scalers,
+    prepare_chunk, required_columns, sha256_file, split_cutoffs, split_for_time,
 )
 from utils.graph_schema import get_feature_profile  # noqa: E402
 
@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunksize", type=int, default=250_000)
     parser.add_argument("--max-windows", type=int, default=None,
                         help="Stop after this many windows per day for a smoke build.")
+    parser.add_argument("--preflight-only", action="store_true",
+                        help="Write the full input feature audit and exit without producing graphs.")
     parser.add_argument("--resume", action="store_true",
                         help="Resume a previously interrupted build with the same output root and configuration.")
     parser.add_argument("--overwrite", action="store_true",
@@ -147,6 +149,14 @@ def main() -> None:
     elif root.exists() and not args.resume:
         raise FileExistsError(f"{root} already exists. Use a new graph version, --resume, or deliberate --overwrite.")
     root.mkdir(parents=True, exist_ok=True)
+
+    if args.preflight_only:
+        preflight = feature_preflight_audit(input_csvs, profiles, args.chunksize)
+        atomic_json_dump(preflight, root / "feature_preflight.json")
+        print(json.dumps({"output_root": str(root), "preflight": str(root / "feature_preflight.json"), "status": preflight["status"]}, indent=2))
+        if preflight["status"] != "passed":
+            raise RuntimeError("Feature preflight failed. Resolve data-quality failures before graph construction.")
+        return
 
     state = load_state(state_path)
     if state.get("completed"):

@@ -147,6 +147,10 @@ requires a separate streaming or replay study.
 ### 3.2 Splits and scaling
 
 - Define train, validation, and Test1 using `decision_time`, not `flow_start`.
+- Derive provisional chronological cutoffs from the Day-1 decision-time span,
+  then round each cutoff upward to the next 30-second window boundary. With
+  the convention `decision_time < cutoff`, this preserves the intended split
+  membership while making every split boundary a graph boundary.
 - Fit `StandardScaler` only with flows available in train.
 - Apply the frozen scaler to validation, Test1, and Test2.
 - A flow ending after the train/validation cutoff belongs to the split determined
@@ -275,6 +279,11 @@ Implement these both as unit tests and as a graph-builder audit:
 - every graph's stored profile/schema hash agrees with its collection manifest;
 - every `global_node_ids` entry resolves through the declared day-specific map,
   and sampled decoded edge endpoints match the raw provenance rows;
+- before any graph files are written, a full corrected-input preflight reports
+  invalid ports, protocols, and numeric values; the destination-port category
+  distribution; port-zero counts by protocol; and the most common ports in
+  each residual category. Invalid port, protocol, or numeric values fail the
+  preflight rather than silently entering an `other` category;
 - no `NaN`, infinity, or invalid `log1p` inputs are present;
 - no label, IP, timestamp, flow ID, or metadata column is used as input;
 - total-flow and positive-flow counts are conserved from corrected CSV through

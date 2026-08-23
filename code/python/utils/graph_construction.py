@@ -8,6 +8,7 @@ for feature construction, split selection, or IP-to-ID mapping.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import Counter
 import hashlib
 import ipaddress
 import json
@@ -22,7 +23,11 @@ import torch
 from sklearn.preprocessing import StandardScaler
 from torch_geometric.data import Data
 
-from .graph_schema import FeatureProfile, get_feature_profile, destination_port_one_hot, protocol_one_hot, validate_numeric_frame
+from .graph_schema import (
+    FeatureProfile, PORT_CATEGORY_COLUMNS, PROTOCOL_CATEGORY_COLUMNS,
+    get_feature_profile, destination_port_one_hot, protocol_one_hot,
+    validate_numeric_frame,
+)
 
 
 WINDOW_MS = 30_000
@@ -180,9 +185,18 @@ def split_cutoffs(input_csvs: Iterable[Path], day: DaySpec, chunksize: int, usec
     if minimum is None or maximum is None or maximum <= minimum:
         raise ValueError(f"Could not derive valid Day-1 decision-time bounds for {day.source_file}.")
     duration = maximum - minimum
-    train_end = minimum + int(duration * float(day.train_ratio))
-    val_end = minimum + int(duration * float(day.train_ratio + day.validation_ratio))
-    return {"train_end_ms": train_end, "val_end_ms": val_end}
+    raw_train_end = minimum + int(duration * float(day.train_ratio))
+    raw_val_end = minimum + int(duration * float(day.train_ratio + day.validation_ratio))
+    train_end = ((raw_train_end + WINDOW_MS - 1) // WINDOW_MS) * WINDOW_MS
+    val_end = ((raw_val_end + WINDOW_MS - 1) // WINDOW_MS) * WINDOW_MS
+    if not minimum < train_end < val_end <= maximum + WINDOW_MS:
+        raise AssertionError("Window-aligned Day-1 split cutoffs are invalid.")
+    return {
+        "train_end_ms": train_end,
+        "val_end_ms": val_end,
+        "raw_train_end_ms": raw_train_end,
+        "raw_val_end_ms": raw_val_end,
+    }
 
 
 def split_for_time(day: DaySpec, decision_time_ms: int, cutoffs: dict[str, int | None]) -> str:
@@ -232,6 +246,103 @@ def encode_edge_attributes(frame: pd.DataFrame, profile: FeatureProfile, scaler:
     if not np.isfinite(edge_attr).all():
         raise ValueError(f"{profile.name} produced NaN or infinite edge features.")
     return edge_attr
+
+
+def _counter_payload(counter: Counter, limit: int | None = None) -> dict[str, int]:
+    """Convert a counter to a stable JSON-ready representation."""
+    items = sorted(counter.items(), key=lambda item: (-item[1], str(item[0])))
+    if limit is not None:
+        items = items[:limit]
+    return {str(key): int(value) for key, value in items}
+
+
+def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[FeatureProfile], chunksize: int) -> dict[str, object]:
+    """Scan corrected inputs for feature validity and taxonomy coverage.
+
+    This audit intentionally does not use labels. It is run before graph
+    construction so data-quality failures are reported without partially
+    producing graph files.
+    """
+    profiles = tuple(profiles)
+    usecols = required_columns(profiles)
+    summary: dict[str, object] = {
+        "input_rows": 0,
+        "invalid_source_endpoint_rows": 0,
+        "invalid_destination_endpoint_rows": 0,
+        "invalid_port_rows": 0,
+        "invalid_protocol_rows": 0,
+        "invalid_numeric_rows_by_profile": Counter(),
+        "port_category_counts": Counter(),
+        "protocol_category_counts": Counter(),
+        "port_zero_by_protocol": Counter(),
+        "other_privileged_top_ports": Counter(),
+        "other_high_top_ports": Counter(),
+        "valid_protocol_number_counts": Counter(),
+    }
+
+    for path in input_csvs:
+        for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize, low_memory=False):
+            summary["input_rows"] += len(chunk)
+            summary["invalid_source_endpoint_rows"] += int(chunk[SOURCE_IP_COLUMN].map(canonical_ipv4).isna().sum())
+            summary["invalid_destination_endpoint_rows"] += int(chunk[DESTINATION_IP_COLUMN].map(canonical_ipv4).isna().sum())
+
+            port = pd.to_numeric(chunk[DESTINATION_PORT_COLUMN], errors="coerce")
+            port_valid = port.notna() & np.isfinite(port) & (np.floor(port) == port) & port.between(0, 65535)
+            summary["invalid_port_rows"] += int((~port_valid).sum())
+            if port_valid.any():
+                encoded_ports = destination_port_one_hot(port.loc[port_valid])
+                port_categories = encoded_ports.argmax(axis=1)
+                valid_ports = port.loc[port_valid].astype(np.int64).to_numpy()
+                summary["port_category_counts"].update(
+                    PORT_CATEGORY_COLUMNS[index] for index in port_categories
+                )
+                summary["other_privileged_top_ports"].update(
+                    int(value) for value, index in zip(valid_ports, port_categories) if index == 5
+                )
+                summary["other_high_top_ports"].update(
+                    int(value) for value, index in zip(valid_ports, port_categories) if index == 6
+                )
+
+            protocol = pd.to_numeric(chunk[PROTOCOL_COLUMN], errors="coerce")
+            protocol_valid = protocol.notna() & np.isfinite(protocol) & (np.floor(protocol) == protocol) & protocol.between(0, 255)
+            summary["invalid_protocol_rows"] += int((~protocol_valid).sum())
+            protocol_labels = pd.Series("invalid", index=chunk.index, dtype="object")
+            if protocol_valid.any():
+                valid_protocol = protocol.loc[protocol_valid].astype(np.int64)
+                encoded_protocols = protocol_one_hot(valid_protocol)
+                summary["protocol_category_counts"].update(
+                    PROTOCOL_CATEGORY_COLUMNS[index] for index in encoded_protocols.argmax(axis=1)
+                )
+                summary["valid_protocol_number_counts"].update(valid_protocol.tolist())
+                protocol_labels.loc[protocol_valid] = valid_protocol.astype(str)
+            zero_ports = port_valid & port.eq(0)
+            summary["port_zero_by_protocol"].update(protocol_labels.loc[zero_ports].tolist())
+
+            for profile in profiles:
+                numeric = chunk.loc[:, profile.numeric_columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
+                valid_numeric_rows = np.isfinite(numeric).all(axis=1) & (numeric >= 0).all(axis=1)
+                summary["invalid_numeric_rows_by_profile"][profile.name] += int((~valid_numeric_rows).sum())
+
+    failed = (
+        int(summary["invalid_port_rows"]) > 0
+        or int(summary["invalid_protocol_rows"]) > 0
+        or any(value > 0 for value in summary["invalid_numeric_rows_by_profile"].values())
+    )
+    return {
+        "status": "failed" if failed else "passed",
+        "input_rows": int(summary["input_rows"]),
+        "invalid_source_endpoint_rows": int(summary["invalid_source_endpoint_rows"]),
+        "invalid_destination_endpoint_rows": int(summary["invalid_destination_endpoint_rows"]),
+        "invalid_port_rows": int(summary["invalid_port_rows"]),
+        "invalid_protocol_rows": int(summary["invalid_protocol_rows"]),
+        "invalid_numeric_rows_by_profile": _counter_payload(summary["invalid_numeric_rows_by_profile"]),
+        "port_category_counts": _counter_payload(summary["port_category_counts"]),
+        "protocol_category_counts": _counter_payload(summary["protocol_category_counts"]),
+        "port_zero_by_protocol": _counter_payload(summary["port_zero_by_protocol"]),
+        "other_privileged_top_ports": _counter_payload(summary["other_privileged_top_ports"], limit=50),
+        "other_high_top_ports": _counter_payload(summary["other_high_top_ports"], limit=50),
+        "valid_protocol_number_counts": _counter_payload(summary["valid_protocol_number_counts"]),
+    }
 
 
 def build_graph(frame: pd.DataFrame, profile: FeatureProfile, scaler: StandardScaler, ip_map: IpIdMap) -> tuple[Data, pd.DataFrame]:
