@@ -73,7 +73,7 @@ def iter_complete_windows(input_csvs: list[Path], day: DaySpec, usecols: list[st
             chunk = chunk.loc[chunk["source_file"].eq(day.source_file)]
             if chunk.empty:
                 continue
-            prepared, excluded = prepare_chunk(chunk)
+            prepared, _ = prepare_chunk(chunk)
             if prepared.empty:
                 continue
 
@@ -98,13 +98,13 @@ def iter_complete_windows(input_csvs: list[Path], day: DaySpec, usecols: list[st
                 if last_yielded is not None and decision_time <= last_yielded:
                     raise ValueError("Input rows are not chronologically ordered by flow completion time.")
                 last_yielded = decision_time
-                yield decision_time, group.reset_index(drop=True), excluded
+                yield decision_time, group.reset_index(drop=True)
     if not buffer.empty:
         for decision_time, group in buffer.groupby("decision_time_ms", sort=True):
             decision_time = int(decision_time)
             if last_yielded is not None and decision_time <= last_yielded:
                 raise ValueError("Input rows are not chronologically ordered by flow completion time.")
-            yield decision_time, group.reset_index(drop=True), {"input_rows": 0, "invalid_endpoint_rows": 0, "invalid_time_or_duration_rows": 0}
+            yield decision_time, group.reset_index(drop=True)
 
 
 def load_state(path: Path) -> dict[str, object]:
@@ -121,14 +121,25 @@ def save_profile_artifacts(root: Path, profiles, scalers) -> None:
         joblib.dump(scalers[profile.name], profile_root / "scaler.joblib")
 
 
-def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec]) -> dict[str, object]:
+def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight: dict[str, object], *, partial: bool) -> dict[str, object]:
     """Audit every graph and verify timestamps per profile/split."""
-    result: dict[str, object] = {"profiles": {}}
+    result: dict[str, object] = {
+        "profiles": {},
+        "input_accounting": {
+            key: preflight[key]
+            for key in (
+                "input_rows", "positive_rows", "retained_rows",
+                "retained_positive_rows", "excluded_rows",
+                "excluded_positive_rows", "by_source_file",
+            )
+        },
+    }
     for profile in profiles:
-        profile_summary: dict[str, object] = {"splits": {}}
+        profile_summary: dict[str, object] = {"splits": {}, "conservation_by_day": {}}
         for day in days:
             map_path = root / "mappings" / f"{day.name}_ip_to_id.json"
             mapping = IpIdMap.from_file(map_path)
+            day_totals = Counter()
             for split in day.split_names:
                 graph_dir = root / profile.name / split
                 if not graph_dir.exists():
@@ -145,6 +156,26 @@ def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec]) -> dict[st
                     previous_timestamp = timestamp
                     totals.update(audit)
                 profile_summary["splits"][split] = dict(totals)
+                day_totals.update(totals)
+
+            expected = preflight["by_source_file"][day.source_file]
+            conservation = {
+                "source_file": day.source_file,
+                "expected_edges": int(expected["retained_rows"]),
+                "observed_edges": int(day_totals["edges"]),
+                "expected_positive_edges": int(expected["retained_positive_rows"]),
+                "observed_positive_edges": int(day_totals["positive_edges"]),
+            }
+            matches = (
+                conservation["observed_edges"] == conservation["expected_edges"]
+                and conservation["observed_positive_edges"] == conservation["expected_positive_edges"]
+            )
+            conservation["status"] = "partial" if partial else ("passed" if matches else "failed")
+            if not partial and not matches:
+                raise AssertionError(
+                    f"Flow conservation failed for {profile.name}/{day.name}: {conservation}"
+                )
+            profile_summary["conservation_by_day"][day.name] = conservation
         result["profiles"][profile.name] = profile_summary
     return result
 
@@ -177,6 +208,11 @@ def main() -> None:
             raise RuntimeError("Feature preflight failed. Resolve data-quality failures before graph construction.")
         return
 
+    preflight = feature_preflight_audit(input_csvs, profiles, args.chunksize)
+    atomic_json_dump(preflight, root / "feature_preflight.json")
+    if preflight["status"] != "passed":
+        raise RuntimeError("Feature preflight failed. Resolve data-quality failures before graph construction.")
+
     state = load_state(state_path)
     if state.get("completed"):
         raise RuntimeError("This graph build is already complete. Use a new versioned output root.")
@@ -207,9 +243,7 @@ def main() -> None:
         mapping = IpIdMap.from_file(map_path) if args.resume and map_path.exists() else IpIdMap()
         last_completed = day_state.get("last_completed_decision_time_ms") if args.resume else None
         processed = 0
-        exclusions = Counter(day_state.get("exclusions", {}))
-        for decision_time, group, counts in iter_complete_windows(input_csvs, day, usecols, args.chunksize):
-            exclusions.update(counts)
+        for decision_time, group in iter_complete_windows(input_csvs, day, usecols, args.chunksize):
             if last_completed is not None and decision_time <= int(last_completed):
                 continue
             split = split_for_time(day, decision_time, day1_cutoffs)
@@ -225,7 +259,6 @@ def main() -> None:
             provenance.to_csv(provenance_path, index=False)
             atomic_json_dump(mapping.payload(day.name), map_path)
             day_state["last_completed_decision_time_ms"] = decision_time
-            day_state["exclusions"] = dict(exclusions)
             state["completed"] = False
             atomic_json_dump(state, state_path)
             processed += 1
@@ -234,13 +267,16 @@ def main() -> None:
                 break
 
     is_partial = args.max_windows is not None
-    audit = audit_output(root, profiles, days)
+    audit = audit_output(root, profiles, days, preflight, partial=is_partial)
     audit["status"] = "partial" if is_partial else "passed"
     atomic_json_dump(audit, root / "graph_audit.json")
     state["completed"] = not is_partial
     atomic_json_dump(state, state_path)
     if not is_partial:
-        atomic_json_dump(build_metadata | {"audit": audit, "status": "passed"}, root / "graph_manifest.json")
+        atomic_json_dump(
+            build_metadata | {"input_accounting": audit["input_accounting"], "audit": audit, "status": "passed"},
+            root / "graph_manifest.json",
+        )
     print(json.dumps({"output_root": str(root), "audit": str(root / "graph_audit.json"), "status": audit["status"]}, indent=2))
 
 

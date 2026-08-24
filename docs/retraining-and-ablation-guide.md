@@ -302,6 +302,11 @@ Implement these both as unit tests and as a graph-builder audit:
 - total-flow and positive-flow counts are conserved from corrected CSV through
   graph splits, including documented endpoint exclusions.
 
+The production preflight records total, retained, and excluded row/positive
+counts globally and per source file. The final graph audit must match retained
+rows and positives against serialized edges for every profile and day; a
+conservation mismatch prevents publication of the graph manifest.
+
 Unit-test a short flow, a flow spanning several windows, a flow crossing a split
 cutoff, an empty window, an IP returning after a long idle period, a new IP
 first appearing in validation or Test1, and source-row identifiers repeated

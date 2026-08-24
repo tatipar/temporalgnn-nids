@@ -54,10 +54,10 @@ class CompleteWindowIteratorTests(unittest.TestCase):
             frame.to_csv(path, index=False)
             windows = list(iter_complete_windows([path], DAY1, self.COLUMNS, chunksize=3))
 
-        decision_times = [decision_time for decision_time, _, _ in windows]
+        decision_times = [decision_time for decision_time, _ in windows]
         source_rows = [
             int(source_row_id)
-            for _, group, _ in windows
+            for _, group in windows
             for source_row_id in group["source_row_id"]
         ]
         self.assertEqual(decision_times, sorted(set(decision_times)))
