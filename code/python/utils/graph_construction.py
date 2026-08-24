@@ -32,6 +32,7 @@ from .graph_schema import (
 
 WINDOW_MS = 30_000
 TIME_COLUMN = "FLOW_START_MILLISECONDS"
+END_TIME_COLUMN = "FLOW_END_MILLISECONDS"
 DURATION_COLUMN = "FLOW_DURATION_MILLISECONDS"
 SOURCE_IP_COLUMN = "IPV4_SRC_ADDR"
 DESTINATION_IP_COLUMN = "IPV4_DST_ADDR"
@@ -148,7 +149,7 @@ def endpoint_invalid_reason(value: object) -> str | None:
 def required_columns(profiles: Iterable[FeatureProfile]) -> list[str]:
     """Return the complete input schema required by a build request."""
     columns = {
-        TIME_COLUMN, DURATION_COLUMN, SOURCE_IP_COLUMN, DESTINATION_IP_COLUMN,
+        TIME_COLUMN, END_TIME_COLUMN, DURATION_COLUMN, SOURCE_IP_COLUMN, DESTINATION_IP_COLUMN,
         DESTINATION_PORT_COLUMN, PROTOCOL_COLUMN, TARGET_COLUMN,
         SOURCE_FILE_COLUMN, SOURCE_ROW_ID_COLUMN,
     }
@@ -168,12 +169,19 @@ def prepare_chunk(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     result = result.loc[endpoint_ok].copy()
 
     start = pd.to_numeric(result[TIME_COLUMN], errors="coerce")
+    end = pd.to_numeric(result[END_TIME_COLUMN], errors="coerce")
     duration = pd.to_numeric(result[DURATION_COLUMN], errors="coerce")
-    time_ok = np.isfinite(start) & np.isfinite(duration) & (duration >= 0)
+    time_ok = (
+        np.isfinite(start)
+        & np.isfinite(end)
+        & np.isfinite(duration)
+        & (duration >= 0)
+        & (end >= start)
+    )
     counts["invalid_time_or_duration_rows"] = int((~time_ok).sum())
     result = result.loc[time_ok].copy()
     result["flow_start_ms"] = start.loc[time_ok].to_numpy(dtype=np.float64)
-    result["flow_end_ms"] = result["flow_start_ms"] + duration.loc[time_ok].to_numpy(dtype=np.float64)
+    result["flow_end_ms"] = end.loc[time_ok].to_numpy(dtype=np.float64)
     result["window_start_ms"] = (np.floor(result["flow_end_ms"] / WINDOW_MS) * WINDOW_MS).astype(np.int64)
     result["decision_time_ms"] = result["window_start_ms"] + WINDOW_MS
     return result, counts

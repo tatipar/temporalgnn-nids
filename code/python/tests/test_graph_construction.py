@@ -35,6 +35,7 @@ class TemporalContractTests(unittest.TestCase):
     def test_long_flow_is_assigned_once_at_its_completion_window(self) -> None:
         frame = pd.DataFrame({
             "FLOW_START_MILLISECONDS": [13 * 3_600_000 + 57 * 60_000],
+            "FLOW_END_MILLISECONDS": [14 * 3_600_000 + 3 * 60_000 + 40_000],
             "FLOW_DURATION_MILLISECONDS": [400_000],
             "IPV4_SRC_ADDR": ["172.31.69.24"],
             "IPV4_DST_ADDR": ["13.58.225.34"],
@@ -48,6 +49,7 @@ class TemporalContractTests(unittest.TestCase):
     def test_boundary_flow_uses_the_following_half_open_window(self) -> None:
         frame = pd.DataFrame({
             "FLOW_START_MILLISECONDS": [14 * 3_600_000 + 3 * 60_000 + 30_000],
+            "FLOW_END_MILLISECONDS": [14 * 3_600_000 + 4 * 60_000],
             "FLOW_DURATION_MILLISECONDS": [30_000],
             "IPV4_SRC_ADDR": ["172.31.69.24"],
             "IPV4_DST_ADDR": ["13.58.225.34"],
@@ -55,6 +57,18 @@ class TemporalContractTests(unittest.TestCase):
         prepared, _ = prepare_chunk(frame)
         self.assertEqual(int(prepared.iloc[0]["window_start_ms"]), 14 * 3_600_000 + 4 * 60_000)
         self.assertEqual(int(prepared.iloc[0]["decision_time_ms"]), 14 * 3_600_000 + 4 * 60_000 + 30_000)
+
+    def test_recorded_flow_end_is_authoritative_at_a_window_boundary(self) -> None:
+        frame = pd.DataFrame({
+            "FLOW_START_MILLISECONDS": [29_998],
+            "FLOW_END_MILLISECONDS": [29_999],
+            "FLOW_DURATION_MILLISECONDS": [2],
+            "IPV4_SRC_ADDR": ["192.0.2.1"],
+            "IPV4_DST_ADDR": ["192.0.2.2"],
+        })
+        prepared, _ = prepare_chunk(frame)
+        self.assertEqual(float(prepared.iloc[0]["flow_end_ms"]), 29_999)
+        self.assertEqual(int(prepared.iloc[0]["decision_time_ms"]), 30_000)
 
     def test_map_is_append_only_and_bidirectional(self) -> None:
         mapping = IpIdMap()
@@ -73,6 +87,7 @@ class TemporalContractTests(unittest.TestCase):
     def test_ipv6_endpoints_are_canonicalized_and_retained(self) -> None:
         frame = pd.DataFrame({
             "FLOW_START_MILLISECONDS": [0],
+            "FLOW_END_MILLISECONDS": [1],
             "FLOW_DURATION_MILLISECONDS": [1],
             "IPV4_SRC_ADDR": ["2001:0DB8:0:0::1"],
             "IPV4_DST_ADDR": ["2001:db8::2"],

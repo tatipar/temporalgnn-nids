@@ -20,7 +20,7 @@ import pandas as pd
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent))
 from utils.graph_construction import (  # noqa: E402
-    DAY1, DAY2, DaySpec, IpIdMap, atomic_json_dump, atomic_torch_save,
+    DAY1, DAY2, END_TIME_COLUMN, DaySpec, IpIdMap, atomic_json_dump, atomic_torch_save,
     audit_graph_file, build_graph, feature_preflight_audit, fit_scalers,
     prepare_chunk, required_columns, sha256_file, split_cutoffs, split_for_time,
 )
@@ -196,6 +196,7 @@ def main() -> None:
         "profiles": {profile.name: profile.sha256() for profile in profiles},
         "window_ms": 30_000,
         "window_policy": "flow_end_in_half_open_window; decision_time_is_window_close",
+        "flow_end_column": END_TIME_COLUMN,
         "day1_cutoffs": day1_cutoffs,
     }
     atomic_json_dump(build_metadata, root / "build_configuration.json")

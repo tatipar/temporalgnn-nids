@@ -101,11 +101,17 @@ row define:
 
 ```text
 flow_start     = FLOW_START_TIME
-flow_end       = flow_start + FLOW_DURATION_MILLISECONDS
+flow_end       = FLOW_END_MILLISECONDS
 window_start   = start of the 30-second half-open window containing flow_end
 window_end     = window_start + 30 seconds
 decision_time  = window_end
 ```
+
+`FLOW_END_MILLISECONDS` is authoritative for graph assignment. An audit of the
+frozen corrected input found that it differs from
+`flow_start + FLOW_DURATION_MILLISECONDS` by at most one millisecond,
+consistent with exporter rounding. Duration remains an independent input
+feature.
 
 Windows are aligned to Unix epoch boundaries (`00` and `30` seconds of each
 minute), not to the first row in a CSV or to a chunk boundary.
