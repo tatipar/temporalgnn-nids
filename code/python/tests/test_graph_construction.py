@@ -6,7 +6,7 @@ import unittest
 
 import pandas as pd
 
-from utils.graph_construction import IpIdMap, prepare_chunk
+from utils.graph_construction import IpIdMap, endpoint_invalid_reason, prepare_chunk
 from utils.graph_schema import NFV3_EXTENDED, PORTABLE_CORE, destination_port_one_hot, protocol_one_hot
 
 
@@ -17,7 +17,7 @@ class GraphSchemaTests(unittest.TestCase):
         self.assertNotIn("TCP_FLAGS", PORTABLE_CORE.numeric_columns)
 
     def test_every_port_and_protocol_gets_one_category(self) -> None:
-        ports = destination_port_one_hot(pd.Series([0, 8081, 5985, 445, 5353, 1521, 25, 49152]))
+        ports = destination_port_one_hot(pd.Series([0, 8088, 8022, 445, 389, 11211, 25, 49152]))
         protocols = protocol_one_hot(pd.Series([6, 17, 1, 2, 99]))
         self.assertTrue((ports.sum(axis=1) == 1).all())
         self.assertTrue((protocols.sum(axis=1) == 1).all())
@@ -62,6 +62,12 @@ class TemporalContractTests(unittest.TestCase):
         self.assertEqual(mapping.id_for("13.58.225.34"), 1)
         self.assertEqual(mapping.id_for("172.31.69.24"), 0)
         self.assertEqual(mapping.id_to_ip[1], "13.58.225.34")
+
+    def test_endpoint_reasons_are_explicit(self) -> None:
+        self.assertEqual(endpoint_invalid_reason("0.0.0.0"), "zero_ipv4")
+        self.assertEqual(endpoint_invalid_reason("not-an-ip"), "non_parseable")
+        self.assertEqual(endpoint_invalid_reason("2001:db8::1"), "non_ipv4")
+        self.assertEqual(endpoint_invalid_reason("172.31.69.24"), None)
 
 
 if __name__ == "__main__":

@@ -130,6 +130,21 @@ def canonical_ipv4(value: object) -> str | None:
     return str(address)
 
 
+def endpoint_invalid_reason(value: object) -> str | None:
+    """Return a stable exclusion reason for an unusable endpoint value."""
+    if pd.isna(value) or not str(value).strip():
+        return "missing"
+    try:
+        address = ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        return "non_parseable"
+    if address.version != 4:
+        return "non_ipv4"
+    if str(address) == "0.0.0.0":
+        return "zero_ipv4"
+    return None
+
+
 def required_columns(profiles: Iterable[FeatureProfile]) -> list[str]:
     """Return the complete input schema required by a build request."""
     columns = {
@@ -267,8 +282,11 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
     usecols = required_columns(profiles)
     summary: dict[str, object] = {
         "input_rows": 0,
+        "invalid_any_endpoint_rows": 0,
         "invalid_source_endpoint_rows": 0,
         "invalid_destination_endpoint_rows": 0,
+        "invalid_source_endpoint_reasons": Counter(),
+        "invalid_destination_endpoint_reasons": Counter(),
         "invalid_port_rows": 0,
         "invalid_protocol_rows": 0,
         "invalid_numeric_rows_by_profile": Counter(),
@@ -283,8 +301,15 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
     for path in input_csvs:
         for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize, low_memory=False):
             summary["input_rows"] += len(chunk)
-            summary["invalid_source_endpoint_rows"] += int(chunk[SOURCE_IP_COLUMN].map(canonical_ipv4).isna().sum())
-            summary["invalid_destination_endpoint_rows"] += int(chunk[DESTINATION_IP_COLUMN].map(canonical_ipv4).isna().sum())
+            source_reasons = chunk[SOURCE_IP_COLUMN].map(endpoint_invalid_reason)
+            destination_reasons = chunk[DESTINATION_IP_COLUMN].map(endpoint_invalid_reason)
+            source_invalid = source_reasons.notna()
+            destination_invalid = destination_reasons.notna()
+            summary["invalid_source_endpoint_rows"] += int(source_invalid.sum())
+            summary["invalid_destination_endpoint_rows"] += int(destination_invalid.sum())
+            summary["invalid_any_endpoint_rows"] += int((source_invalid | destination_invalid).sum())
+            summary["invalid_source_endpoint_reasons"].update(source_reasons.loc[source_invalid].tolist())
+            summary["invalid_destination_endpoint_reasons"].update(destination_reasons.loc[destination_invalid].tolist())
 
             port = pd.to_numeric(chunk[DESTINATION_PORT_COLUMN], errors="coerce")
             port_valid = port.notna() & np.isfinite(port) & (np.floor(port) == port) & port.between(0, 65535)
@@ -331,8 +356,11 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
     return {
         "status": "failed" if failed else "passed",
         "input_rows": int(summary["input_rows"]),
+        "invalid_any_endpoint_rows": int(summary["invalid_any_endpoint_rows"]),
         "invalid_source_endpoint_rows": int(summary["invalid_source_endpoint_rows"]),
         "invalid_destination_endpoint_rows": int(summary["invalid_destination_endpoint_rows"]),
+        "invalid_source_endpoint_reasons": _counter_payload(summary["invalid_source_endpoint_reasons"]),
+        "invalid_destination_endpoint_reasons": _counter_payload(summary["invalid_destination_endpoint_reasons"]),
         "invalid_port_rows": int(summary["invalid_port_rows"]),
         "invalid_protocol_rows": int(summary["invalid_protocol_rows"]),
         "invalid_numeric_rows_by_profile": _counter_payload(summary["invalid_numeric_rows_by_profile"]),

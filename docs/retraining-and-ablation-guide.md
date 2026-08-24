@@ -211,8 +211,10 @@ The fixed destination-port taxonomy is: `web_http_proxy`, `admin_remote`,
 `windows_smb_rpc`, `infrastructure`, `database`, `other_privileged`,
 `other_high`, and `not_applicable_or_zero`. The final category is reserved for
 destination port zero; it must not be interpreted as a privileged service.
-The schema JSON is authoritative for the explicit port lists in
-each named category. Ports must be valid integers in `0..65535`; protocol
+`infrastructure` includes both network services and identity services such as
+Kerberos and LDAP. The schema JSON is authoritative for the explicit port lists
+in each named category.
+Ports must be valid integers in `0..65535`; protocol
 values must be valid integer IANA protocol numbers in `0..255`. Invalid values
 are data-quality failures, not members of an `other` category.
 
@@ -284,6 +286,10 @@ Implement these both as unit tests and as a graph-builder audit:
   distribution; port-zero counts by protocol; and the most common ports in
   each residual category. Invalid port, protocol, or numeric values fail the
   preflight rather than silently entering an `other` category;
+- the preflight reports invalid source endpoints, invalid destination endpoints,
+  and their row-level union separately. It also reports the exclusion reasons
+  (`missing`, `non_parseable`, `non_ipv4`, or `zero_ipv4`), so endpoint counts
+  cannot be double-counted across both columns;
 - no `NaN`, infinity, or invalid `log1p` inputs are present;
 - no label, IP, timestamp, flow ID, or metadata column is used as input;
 - total-flow and positive-flow counts are conserved from corrected CSV through
