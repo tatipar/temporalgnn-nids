@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+import tempfile
 
 import pandas as pd
 
-from utils.graph_construction import IpIdMap, endpoint_invalid_reason, prepare_chunk
+from utils.graph_construction import IpIdMap, endpoint_invalid_reason, feature_preflight_audit, prepare_chunk
 from utils.graph_schema import NFV3_EXTENDED, PORTABLE_CORE, destination_port_one_hot, protocol_one_hot
 
 
@@ -96,6 +98,39 @@ class TemporalContractTests(unittest.TestCase):
         self.assertEqual(counts["invalid_endpoint_rows"], 0)
         self.assertEqual(prepared.iloc[0]["source_ip"], "2001:db8::1")
         self.assertEqual(prepared.iloc[0]["destination_ip"], "2001:db8::2")
+
+    def test_preflight_counts_retained_and_excluded_positives(self) -> None:
+        frame = pd.DataFrame({
+            "source_file": ["day.csv"] * 4,
+            "source_row_id": list(range(4)),
+            "FLOW_START_MILLISECONDS": [0, 1, 2, 3],
+            "FLOW_END_MILLISECONDS": [0, 1, 1, 3],
+            "FLOW_DURATION_MILLISECONDS": [0, 0, 0, 0],
+            "IPV4_SRC_ADDR": ["192.0.2.1", "0.0.0.0", "192.0.2.1", "192.0.2.1"],
+            "IPV4_DST_ADDR": ["192.0.2.2"] * 4,
+            "L4_DST_PORT": [80] * 4,
+            "PROTOCOL": [6] * 4,
+            "binary_target": [0, 1, 1, 1],
+            "IN_BYTES": [1] * 4,
+            "OUT_BYTES": [1] * 4,
+            "IN_PKTS": [1] * 4,
+            "OUT_PKTS": [1] * 4,
+        })
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.csv"
+            frame.to_csv(path, index=False)
+            audit = feature_preflight_audit([path], [PORTABLE_CORE], chunksize=2)
+
+        self.assertEqual(audit["status"], "failed")
+        self.assertEqual(audit["input_rows"], 4)
+        self.assertEqual(audit["positive_rows"], 3)
+        self.assertEqual(audit["retained_rows"], 2)
+        self.assertEqual(audit["retained_positive_rows"], 1)
+        self.assertEqual(audit["excluded_rows"], 2)
+        self.assertEqual(audit["excluded_positive_rows"], 2)
+        self.assertEqual(audit["invalid_any_endpoint_positive_rows"], 1)
+        self.assertEqual(audit["invalid_time_or_duration_positive_rows"], 1)
 
 
 if __name__ == "__main__":

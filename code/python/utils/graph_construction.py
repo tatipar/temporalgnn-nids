@@ -282,7 +282,8 @@ def _counter_payload(counter: Counter, limit: int | None = None) -> dict[str, in
 def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[FeatureProfile], chunksize: int) -> dict[str, object]:
     """Scan corrected inputs for feature validity and taxonomy coverage.
 
-    This audit intentionally does not use labels. It is run before graph
+    Labels are used only to prove row/class conservation and never to choose a
+    feature, split, threshold, or model. The audit runs before graph
     construction so data-quality failures are reported without partially
     producing graph files.
     """
@@ -290,13 +291,24 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
     usecols = required_columns(profiles)
     summary: dict[str, object] = {
         "input_rows": 0,
+        "positive_rows": 0,
+        "retained_rows": 0,
+        "retained_positive_rows": 0,
+        "excluded_rows": 0,
+        "excluded_positive_rows": 0,
         "invalid_any_endpoint_rows": 0,
+        "invalid_any_endpoint_positive_rows": 0,
         "invalid_source_endpoint_rows": 0,
         "invalid_destination_endpoint_rows": 0,
         "invalid_source_endpoint_reasons": Counter(),
         "invalid_destination_endpoint_reasons": Counter(),
         "invalid_port_rows": 0,
         "invalid_protocol_rows": 0,
+        "invalid_binary_target_rows": 0,
+        "invalid_time_or_duration_rows": 0,
+        "invalid_time_or_duration_positive_rows": 0,
+        "flow_end_difference_gt_1ms_rows": 0,
+        "flow_end_max_absolute_difference_ms": 0.0,
         "invalid_numeric_rows_by_profile": Counter(),
         "port_category_counts": Counter(),
         "protocol_category_counts": Counter(),
@@ -304,6 +316,7 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
         "other_privileged_top_ports": Counter(),
         "other_high_top_ports": Counter(),
         "valid_protocol_number_counts": Counter(),
+        "by_source_file": {},
     }
 
     for path in input_csvs:
@@ -313,11 +326,63 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
             destination_reasons = chunk[DESTINATION_IP_COLUMN].map(endpoint_invalid_reason)
             source_invalid = source_reasons.notna()
             destination_invalid = destination_reasons.notna()
+            endpoint_invalid = source_invalid | destination_invalid
+
+            target = pd.to_numeric(chunk[TARGET_COLUMN], errors="coerce")
+            target_valid = target.notna() & np.isfinite(target) & target.isin((0, 1))
+            positive = target_valid & target.eq(1)
+
+            start = pd.to_numeric(chunk[TIME_COLUMN], errors="coerce")
+            end = pd.to_numeric(chunk[END_TIME_COLUMN], errors="coerce")
+            duration = pd.to_numeric(chunk[DURATION_COLUMN], errors="coerce")
+            time_valid = (
+                start.notna() & np.isfinite(start)
+                & end.notna() & np.isfinite(end)
+                & duration.notna() & np.isfinite(duration)
+                & duration.ge(0) & end.ge(start)
+            )
+            invalid_time_after_endpoint = ~endpoint_invalid & ~time_valid
+            retained = ~endpoint_invalid & time_valid & target_valid
+            excluded = ~retained
+
+            summary["positive_rows"] += int(positive.sum())
+            summary["retained_rows"] += int(retained.sum())
+            summary["retained_positive_rows"] += int((retained & positive).sum())
+            summary["excluded_rows"] += int(excluded.sum())
+            summary["excluded_positive_rows"] += int((excluded & positive).sum())
             summary["invalid_source_endpoint_rows"] += int(source_invalid.sum())
             summary["invalid_destination_endpoint_rows"] += int(destination_invalid.sum())
-            summary["invalid_any_endpoint_rows"] += int((source_invalid | destination_invalid).sum())
+            summary["invalid_any_endpoint_rows"] += int(endpoint_invalid.sum())
+            summary["invalid_any_endpoint_positive_rows"] += int((endpoint_invalid & positive).sum())
             summary["invalid_source_endpoint_reasons"].update(source_reasons.loc[source_invalid].tolist())
             summary["invalid_destination_endpoint_reasons"].update(destination_reasons.loc[destination_invalid].tolist())
+            summary["invalid_binary_target_rows"] += int((~target_valid).sum())
+            summary["invalid_time_or_duration_rows"] += int(invalid_time_after_endpoint.sum())
+            summary["invalid_time_or_duration_positive_rows"] += int((invalid_time_after_endpoint & positive).sum())
+
+            valid_time = time_valid
+            if valid_time.any():
+                end_difference = end.loc[valid_time] - (start.loc[valid_time] + duration.loc[valid_time])
+                absolute_difference = end_difference.abs()
+                summary["flow_end_difference_gt_1ms_rows"] += int(absolute_difference.gt(1).sum())
+                summary["flow_end_max_absolute_difference_ms"] = max(
+                    float(summary["flow_end_max_absolute_difference_ms"]),
+                    float(absolute_difference.max()),
+                )
+
+            for source_file, indices in chunk.groupby(SOURCE_FILE_COLUMN, sort=False).groups.items():
+                file_summary = summary["by_source_file"].setdefault(str(source_file), Counter())
+                file_summary["input_rows"] += len(indices)
+                file_summary["positive_rows"] += int(positive.loc[indices].sum())
+                file_summary["retained_rows"] += int(retained.loc[indices].sum())
+                file_summary["retained_positive_rows"] += int((retained & positive).loc[indices].sum())
+                file_summary["excluded_rows"] += int(excluded.loc[indices].sum())
+                file_summary["excluded_positive_rows"] += int((excluded & positive).loc[indices].sum())
+                file_summary["invalid_endpoint_rows"] += int(endpoint_invalid.loc[indices].sum())
+                file_summary["invalid_endpoint_positive_rows"] += int((endpoint_invalid & positive).loc[indices].sum())
+                file_summary["invalid_time_or_duration_rows"] += int(invalid_time_after_endpoint.loc[indices].sum())
+                file_summary["invalid_time_or_duration_positive_rows"] += int((invalid_time_after_endpoint & positive).loc[indices].sum())
+                file_summary["invalid_binary_target_rows"] += int((~target_valid).loc[indices].sum())
 
             port = pd.to_numeric(chunk[DESTINATION_PORT_COLUMN], errors="coerce")
             port_valid = port.notna() & np.isfinite(port) & (np.floor(port) == port) & port.between(0, 65535)
@@ -359,18 +424,32 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
     failed = (
         int(summary["invalid_port_rows"]) > 0
         or int(summary["invalid_protocol_rows"]) > 0
+        or int(summary["invalid_binary_target_rows"]) > 0
+        or int(summary["invalid_time_or_duration_rows"]) > 0
+        or int(summary["flow_end_difference_gt_1ms_rows"]) > 0
         or any(value > 0 for value in summary["invalid_numeric_rows_by_profile"].values())
     )
     return {
         "status": "failed" if failed else "passed",
         "input_rows": int(summary["input_rows"]),
+        "positive_rows": int(summary["positive_rows"]),
+        "retained_rows": int(summary["retained_rows"]),
+        "retained_positive_rows": int(summary["retained_positive_rows"]),
+        "excluded_rows": int(summary["excluded_rows"]),
+        "excluded_positive_rows": int(summary["excluded_positive_rows"]),
         "invalid_any_endpoint_rows": int(summary["invalid_any_endpoint_rows"]),
+        "invalid_any_endpoint_positive_rows": int(summary["invalid_any_endpoint_positive_rows"]),
         "invalid_source_endpoint_rows": int(summary["invalid_source_endpoint_rows"]),
         "invalid_destination_endpoint_rows": int(summary["invalid_destination_endpoint_rows"]),
         "invalid_source_endpoint_reasons": _counter_payload(summary["invalid_source_endpoint_reasons"]),
         "invalid_destination_endpoint_reasons": _counter_payload(summary["invalid_destination_endpoint_reasons"]),
         "invalid_port_rows": int(summary["invalid_port_rows"]),
         "invalid_protocol_rows": int(summary["invalid_protocol_rows"]),
+        "invalid_binary_target_rows": int(summary["invalid_binary_target_rows"]),
+        "invalid_time_or_duration_rows": int(summary["invalid_time_or_duration_rows"]),
+        "invalid_time_or_duration_positive_rows": int(summary["invalid_time_or_duration_positive_rows"]),
+        "flow_end_difference_gt_1ms_rows": int(summary["flow_end_difference_gt_1ms_rows"]),
+        "flow_end_max_absolute_difference_ms": float(summary["flow_end_max_absolute_difference_ms"]),
         "invalid_numeric_rows_by_profile": _counter_payload(summary["invalid_numeric_rows_by_profile"]),
         "port_category_counts": _counter_payload(summary["port_category_counts"]),
         "protocol_category_counts": _counter_payload(summary["protocol_category_counts"]),
@@ -378,6 +457,10 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
         "other_privileged_top_ports": _counter_payload(summary["other_privileged_top_ports"], limit=50),
         "other_high_top_ports": _counter_payload(summary["other_high_top_ports"], limit=50),
         "valid_protocol_number_counts": _counter_payload(summary["valid_protocol_number_counts"]),
+        "by_source_file": {
+            source_file: {key: int(value) for key, value in sorted(counts.items())}
+            for source_file, counts in sorted(summary["by_source_file"].items())
+        },
     }
 
 
