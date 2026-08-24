@@ -287,8 +287,9 @@ Implement these both as unit tests and as a graph-builder audit:
   each residual category. Invalid port, protocol, or numeric values fail the
   preflight rather than silently entering an `other` category;
 - the preflight reports invalid source endpoints, invalid destination endpoints,
-  and their row-level union separately. It also reports the exclusion reasons
-  (`missing`, `non_parseable`, `non_ipv4`, or `zero_ipv4`), so endpoint counts
+  and their row-level union separately. IPv4 and IPv6 endpoints are
+  canonicalized and retained; it reports the exclusion reasons (`missing`,
+  `non_parseable`, `zero_ipv4`, or `unspecified_ipv6`) so endpoint counts
   cannot be double-counted across both columns;
 - no `NaN`, infinity, or invalid `log1p` inputs are present;
 - no label, IP, timestamp, flow ID, or metadata column is used as input;

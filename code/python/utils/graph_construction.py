@@ -106,7 +106,7 @@ class IpIdMap:
         return {
             "day": day_name,
             "creation_policy": "append_only_first_valid_chronological_appearance",
-            "ip_normalization": "ipaddress.ip_address canonical IPv4 string; missing, invalid, IPv6, and 0.0.0.0 excluded",
+            "ip_normalization": "ipaddress.ip_address canonical IPv4 or IPv6 string; missing, non-parseable, and unspecified addresses (0.0.0.0 or ::) excluded",
             "entries": len(self.ip_to_id),
             "ip_to_id": dict(sorted(self.ip_to_id.items(), key=lambda item: item[1])),
             "id_to_ip": {str(node_id): ip for node_id, ip in sorted(self.id_to_ip.items())},
@@ -117,15 +117,15 @@ class IpIdMap:
         return cls(json.loads(path.read_text(encoding="utf-8"))["ip_to_id"])
 
 
-def canonical_ipv4(value: object) -> str | None:
-    """Return a canonical usable IPv4 address, otherwise ``None``."""
+def canonical_ip(value: object) -> str | None:
+    """Return a canonical usable IPv4 or IPv6 address, otherwise ``None``."""
     if pd.isna(value):
         return None
     try:
         address = ipaddress.ip_address(str(value).strip())
     except ValueError:
         return None
-    if address.version != 4 or str(address) == "0.0.0.0":
+    if address.is_unspecified:
         return None
     return str(address)
 
@@ -138,10 +138,10 @@ def endpoint_invalid_reason(value: object) -> str | None:
         address = ipaddress.ip_address(str(value).strip())
     except ValueError:
         return "non_parseable"
-    if address.version != 4:
-        return "non_ipv4"
-    if str(address) == "0.0.0.0":
-        return "zero_ipv4"
+    if address.is_unspecified:
+        if address.version == 4:
+            return "zero_ipv4"
+        return "unspecified_ipv6"
     return None
 
 
@@ -161,8 +161,8 @@ def prepare_chunk(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     """Validate rows and derive flow-end and decision-time columns."""
     counts = {"input_rows": len(frame), "invalid_endpoint_rows": 0, "invalid_time_or_duration_rows": 0}
     result = frame.copy()
-    result["source_ip"] = result[SOURCE_IP_COLUMN].map(canonical_ipv4)
-    result["destination_ip"] = result[DESTINATION_IP_COLUMN].map(canonical_ipv4)
+    result["source_ip"] = result[SOURCE_IP_COLUMN].map(canonical_ip)
+    result["destination_ip"] = result[DESTINATION_IP_COLUMN].map(canonical_ip)
     endpoint_ok = result["source_ip"].notna() & result["destination_ip"].notna()
     counts["invalid_endpoint_rows"] = int((~endpoint_ok).sum())
     result = result.loc[endpoint_ok].copy()

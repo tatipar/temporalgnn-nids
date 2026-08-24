@@ -65,9 +65,22 @@ class TemporalContractTests(unittest.TestCase):
 
     def test_endpoint_reasons_are_explicit(self) -> None:
         self.assertEqual(endpoint_invalid_reason("0.0.0.0"), "zero_ipv4")
+        self.assertEqual(endpoint_invalid_reason("::"), "unspecified_ipv6")
         self.assertEqual(endpoint_invalid_reason("not-an-ip"), "non_parseable")
-        self.assertEqual(endpoint_invalid_reason("2001:db8::1"), "non_ipv4")
+        self.assertEqual(endpoint_invalid_reason("2001:db8::1"), None)
         self.assertEqual(endpoint_invalid_reason("172.31.69.24"), None)
+
+    def test_ipv6_endpoints_are_canonicalized_and_retained(self) -> None:
+        frame = pd.DataFrame({
+            "FLOW_START_MILLISECONDS": [0],
+            "FLOW_DURATION_MILLISECONDS": [1],
+            "IPV4_SRC_ADDR": ["2001:0DB8:0:0::1"],
+            "IPV4_DST_ADDR": ["2001:db8::2"],
+        })
+        prepared, counts = prepare_chunk(frame)
+        self.assertEqual(counts["invalid_endpoint_rows"], 0)
+        self.assertEqual(prepared.iloc[0]["source_ip"], "2001:db8::1")
+        self.assertEqual(prepared.iloc[0]["destination_ip"], "2001:db8::2")
 
 
 if __name__ == "__main__":
