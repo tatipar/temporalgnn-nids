@@ -6,9 +6,14 @@ import unittest
 from pathlib import Path
 import tempfile
 
+import numpy as np
 import pandas as pd
+from sklearn.preprocessing import StandardScaler
 
-from utils.graph_construction import IpIdMap, endpoint_invalid_reason, feature_preflight_audit, prepare_chunk
+from utils.graph_construction import (
+    IpIdMap, atomic_torch_save, audit_graph_file, build_graph,
+    endpoint_invalid_reason, feature_preflight_audit, prepare_chunk,
+)
 from utils.graph_schema import NFV3_EXTENDED, PORTABLE_CORE, destination_port_one_hot, protocol_one_hot
 
 
@@ -131,6 +136,46 @@ class TemporalContractTests(unittest.TestCase):
         self.assertEqual(audit["excluded_positive_rows"], 2)
         self.assertEqual(audit["invalid_any_endpoint_positive_rows"], 1)
         self.assertEqual(audit["invalid_time_or_duration_positive_rows"], 1)
+
+    def test_graph_provenance_records_split_window_wait_and_stable_flow_id(self) -> None:
+        frame = pd.DataFrame({
+            "source_file": ["day.csv"],
+            "source_row_id": [7],
+            "FLOW_START_MILLISECONDS": [29_998],
+            "FLOW_END_MILLISECONDS": [29_999],
+            "FLOW_DURATION_MILLISECONDS": [1],
+            "IPV4_SRC_ADDR": ["192.0.2.1"],
+            "IPV4_DST_ADDR": ["192.0.2.2"],
+            "L4_DST_PORT": [80],
+            "PROTOCOL": [6],
+            "binary_target": [1],
+            "IN_BYTES": [1],
+            "OUT_BYTES": [1],
+            "IN_PKTS": [1],
+            "OUT_PKTS": [1],
+        })
+        prepared, _ = prepare_chunk(frame)
+        numeric = prepared.loc[:, PORTABLE_CORE.numeric_columns].to_numpy(dtype=np.float64)
+        scaler = StandardScaler().fit(np.log1p(numeric))
+        mapping = IpIdMap()
+        graph, provenance = build_graph(prepared, PORTABLE_CORE, scaler, mapping, "train")
+
+        self.assertEqual(provenance.iloc[0]["flow_id"], "day.csv:7")
+        self.assertEqual(provenance.iloc[0]["split"], "train")
+        self.assertEqual(float(provenance.iloc[0]["window_wait_ms"]), 1.0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph_path = root / "graph_0000000030000.pt"
+            provenance_path = root / "graph_0000000030000.csv"
+            atomic_torch_save(graph, graph_path)
+            provenance.to_csv(provenance_path, index=False)
+            counts, flow_ids = audit_graph_file(
+                graph_path, PORTABLE_CORE, mapping, provenance_path, "train",
+            )
+
+        self.assertEqual(counts, {"graphs": 1, "edges": 1, "positive_edges": 1})
+        self.assertEqual(flow_ids, ["day.csv:7"])
 
 
 if __name__ == "__main__":

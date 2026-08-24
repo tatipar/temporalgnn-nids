@@ -134,12 +134,15 @@ def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight:
             )
         },
     }
+    seen_flow_ids: set[str] = set()
+    first_profile_name = profiles[0].name
     for profile in profiles:
         profile_summary: dict[str, object] = {"splits": {}, "conservation_by_day": {}}
         for day in days:
             map_path = root / "mappings" / f"{day.name}_ip_to_id.json"
             mapping = IpIdMap.from_file(map_path)
             day_totals = Counter()
+            previous_split_max_timestamp: int | None = None
             for split in day.split_names:
                 graph_dir = root / profile.name / split
                 if not graph_dir.exists():
@@ -149,12 +152,28 @@ def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight:
                 totals = Counter()
                 for graph_path in files:
                     provenance_path = root / "provenance" / day.name / f"{graph_path.stem}.csv"
-                    audit = audit_graph_file(graph_path, profile, mapping, provenance_path)
+                    audit, flow_ids = audit_graph_file(
+                        graph_path, profile, mapping, provenance_path, split,
+                    )
+                    if profile.name == first_profile_name:
+                        duplicates = seen_flow_ids.intersection(flow_ids)
+                        if duplicates:
+                            duplicate = next(iter(duplicates))
+                            raise AssertionError(f"Flow ID {duplicate} occurs in more than one graph.")
+                        seen_flow_ids.update(flow_ids)
                     timestamp = int(graph_path.stem.split("_")[1])
                     if previous_timestamp is not None and timestamp <= previous_timestamp:
                         raise AssertionError(f"Graph timestamps are not strictly increasing in {graph_dir}.")
                     previous_timestamp = timestamp
                     totals.update(audit)
+                if files:
+                    split_min_timestamp = int(files[0].stem.split("_")[1])
+                    split_max_timestamp = int(files[-1].stem.split("_")[1])
+                    if previous_split_max_timestamp is not None and split_min_timestamp <= previous_split_max_timestamp:
+                        raise AssertionError(
+                            f"Graph splits are not chronologically ordered for {profile.name}/{day.name}."
+                        )
+                    previous_split_max_timestamp = split_max_timestamp
                 profile_summary["splits"][split] = dict(totals)
                 day_totals.update(totals)
 
@@ -251,7 +270,9 @@ def main() -> None:
             provenance_name = f"graph_{decision_time:013d}.csv"
             provenance = None
             for profile in profiles:
-                graph, current_provenance = build_graph(group, profile, scalers[profile.name], mapping)
+                graph, current_provenance = build_graph(
+                    group, profile, scalers[profile.name], mapping, split,
+                )
                 atomic_torch_save(graph, root / profile.name / split / graph_name)
                 provenance = current_provenance
             provenance_path = root / "provenance" / day.name / provenance_name
