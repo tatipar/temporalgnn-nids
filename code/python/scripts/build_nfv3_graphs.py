@@ -58,9 +58,16 @@ def make_days(args: argparse.Namespace) -> tuple[DaySpec, DaySpec]:
 
 
 def iter_complete_windows(input_csvs: list[Path], day: DaySpec, usecols: list[str], chunksize: int):
-    """Yield complete chronological decision-time windows without chunk splits."""
+    """Yield complete chronological decision-time windows without chunk splits.
+
+    Input rows must be ordered by flow start within each day. A window is safe
+    to emit once its decision time is not later than the greatest flow start
+    observed so far: every unseen flow starts at or after that watermark and
+    therefore must finish strictly after it.
+    """
     buffer = pd.DataFrame()
     last_yielded: int | None = None
+    last_seen_start: float | None = None
     for path in input_csvs:
         for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize, low_memory=False):
             chunk = chunk.loc[chunk["source_file"].eq(day.source_file)]
@@ -69,11 +76,23 @@ def iter_complete_windows(input_csvs: list[Path], day: DaySpec, usecols: list[st
             prepared, excluded = prepare_chunk(chunk)
             if prepared.empty:
                 continue
-            prepared = prepared.sort_values(["decision_time_ms", "source_row_id"], kind="stable")
+
+            starts = prepared["flow_start_ms"]
+            if not starts.is_monotonic_increasing:
+                raise ValueError(
+                    f"Rows for {day.source_file} are not ordered by FLOW_START_MILLISECONDS."
+                )
+            chunk_min_start = float(starts.iloc[0])
+            if last_seen_start is not None and chunk_min_start < last_seen_start:
+                raise ValueError(
+                    f"Rows for {day.source_file} are not ordered by FLOW_START_MILLISECONDS."
+                )
+            last_seen_start = float(starts.iloc[-1])
+
             combined = pd.concat((buffer, prepared), ignore_index=True)
-            last_time = int(combined["decision_time_ms"].max())
-            complete = combined.loc[combined["decision_time_ms"] < last_time]
-            buffer = combined.loc[combined["decision_time_ms"] == last_time].copy()
+            complete_mask = combined["decision_time_ms"] <= last_seen_start
+            complete = combined.loc[complete_mask]
+            buffer = combined.loc[~complete_mask].copy()
             for decision_time, group in complete.groupby("decision_time_ms", sort=True):
                 decision_time = int(decision_time)
                 if last_yielded is not None and decision_time <= last_yielded:
