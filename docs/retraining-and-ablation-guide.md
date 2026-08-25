@@ -335,7 +335,8 @@ Implement these both as unit tests and as a graph-builder audit:
 - feature order/dimensions, `edge_index`, `edge_attr`, and `y` agree;
 - every graph's stored profile/schema hash agrees with its collection manifest;
 - every `global_node_ids` entry resolves through the declared day-specific map,
-  and sampled decoded edge endpoints match the raw provenance rows;
+  and every directed `edge_index` endpoint decodes to the source and destination
+  global IDs recorded in its provenance row;
 - before any graph files are written, a full corrected-input preflight reports
   invalid ports, protocols, and numeric values; the destination-port category
   distribution; port-zero counts by protocol; and the most common ports in

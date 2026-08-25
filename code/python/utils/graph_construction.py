@@ -649,6 +649,8 @@ def audit_graph_file(
 
     serialized = graph_path.read_bytes()
     data = torch.load(io.BytesIO(serialized), weights_only=False)
+    if data.edge_index.ndim != 2 or data.edge_index.shape[0] != 2:
+        raise AssertionError(f"edge_index must have shape [2, num_edges] in {graph_path}.")
     edges = int(data.edge_index.shape[1])
     if len(provenance) != edges:
         raise AssertionError(f"Provenance does not match graph edges in {provenance_path}.")
@@ -664,6 +666,19 @@ def audit_graph_file(
         raise AssertionError(f"Graph timestamp metadata disagrees in {graph_path}.")
     if not all(int(node_id) in mapping.id_to_ip for node_id in data.global_node_ids.tolist()):
         raise AssertionError(f"A graph ID cannot be decoded by its declared map in {graph_path}.")
+    local_edges = data.edge_index.detach().cpu().numpy().astype(np.int64, copy=False)
+    global_nodes = data.global_node_ids.detach().cpu().numpy().astype(np.int64, copy=False)
+    if edges and (local_edges.min() < 0 or local_edges.max() >= len(global_nodes)):
+        raise AssertionError(f"edge_index contains an invalid local node index in {graph_path}.")
+    graph_sources = global_nodes[local_edges[0]]
+    graph_destinations = global_nodes[local_edges[1]]
+    provenance_sources = provenance["source_global_id"].to_numpy(dtype=np.int64)
+    provenance_destinations = provenance["destination_global_id"].to_numpy(dtype=np.int64)
+    if not (
+        np.array_equal(graph_sources, provenance_sources)
+        and np.array_equal(graph_destinations, provenance_destinations)
+    ):
+        raise AssertionError(f"Directed graph endpoints disagree with provenance in {graph_path}.")
     if (
         not provenance["window_start_ms"].eq(int(data.window_start)).all()
         or not provenance["window_end_ms"].eq(int(data.window_end)).all()

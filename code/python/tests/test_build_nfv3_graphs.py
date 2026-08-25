@@ -92,6 +92,25 @@ class CompleteWindowIteratorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "FLOW_START_MILLISECONDS"):
                 list(iter_complete_windows([path], DAY1, self.COLUMNS, chunksize=2))
 
+    def test_empty_windows_are_not_emitted(self) -> None:
+        frame = pd.DataFrame({
+            "source_file": [DAY1.source_file] * 2,
+            "source_row_id": [0, 1],
+            "FLOW_START_MILLISECONDS": [0, 120_000],
+            "FLOW_END_MILLISECONDS": [0, 120_000],
+            "FLOW_DURATION_MILLISECONDS": [0, 0],
+            "IPV4_SRC_ADDR": ["192.0.2.1", "192.0.2.1"],
+            "IPV4_DST_ADDR": ["192.0.2.2", "192.0.2.2"],
+        })
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gapped.csv"
+            frame.to_csv(path, index=False)
+            windows = list(iter_complete_windows([path], DAY1, self.COLUMNS, chunksize=1))
+
+        self.assertEqual([decision_time for decision_time, _ in windows], [30_000, 150_000])
+        self.assertEqual([len(group) for _, group in windows], [1, 1])
+
 
 class ResumeMappingTests(unittest.TestCase):
     @staticmethod

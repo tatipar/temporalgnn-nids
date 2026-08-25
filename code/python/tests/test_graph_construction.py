@@ -218,6 +218,66 @@ class TemporalContractTests(unittest.TestCase):
         self.assertEqual(len(artifact["sha256"]), 64)
         self.assertGreater(artifact["bytes"], 0)
 
+    def test_graph_audit_rejects_reversed_edge_direction(self) -> None:
+        frame = pd.DataFrame({
+            "source_file": ["day.csv"],
+            "source_row_id": [8],
+            "FLOW_START_MILLISECONDS": [29_998],
+            "FLOW_END_MILLISECONDS": [29_999],
+            "FLOW_DURATION_MILLISECONDS": [1],
+            "IPV4_SRC_ADDR": ["192.0.2.10"],
+            "IPV4_DST_ADDR": ["192.0.2.20"],
+            "L4_DST_PORT": [443],
+            "PROTOCOL": [6],
+            "binary_target": [0],
+            "IN_BYTES": [1],
+            "OUT_BYTES": [1],
+            "IN_PKTS": [1],
+            "OUT_PKTS": [1],
+        })
+        prepared, _ = prepare_chunk(frame)
+        numeric = prepared.loc[:, PORTABLE_CORE.numeric_columns].to_numpy(dtype=np.float64)
+        scaler = StandardScaler().fit(np.log1p(numeric))
+        mapping = IpIdMap()
+        graph, provenance = build_graph(prepared, PORTABLE_CORE, scaler, mapping, "train")
+        graph.edge_index = graph.edge_index.flip(0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            graph_path = root / "graph_0000000030000.pt"
+            provenance_path = root / "graph_0000000030000.csv"
+            atomic_torch_save(graph, graph_path)
+            provenance.to_csv(provenance_path, index=False)
+            with self.assertRaisesRegex(AssertionError, "Directed graph endpoints"):
+                audit_graph_file(
+                    graph_path, PORTABLE_CORE, mapping, provenance_path, "train",
+                )
+
+    def test_flow_id_distinguishes_equal_row_ids_from_different_files(self) -> None:
+        frame = pd.DataFrame({
+            "source_file": ["day-a.csv", "day-b.csv"],
+            "source_row_id": [7, 7],
+            "FLOW_START_MILLISECONDS": [29_998, 29_998],
+            "FLOW_END_MILLISECONDS": [29_999, 29_999],
+            "FLOW_DURATION_MILLISECONDS": [1, 1],
+            "IPV4_SRC_ADDR": ["192.0.2.1", "192.0.2.3"],
+            "IPV4_DST_ADDR": ["192.0.2.2", "192.0.2.4"],
+            "L4_DST_PORT": [80, 80],
+            "PROTOCOL": [6, 6],
+            "binary_target": [0, 1],
+            "IN_BYTES": [1, 1],
+            "OUT_BYTES": [1, 1],
+            "IN_PKTS": [1, 1],
+            "OUT_PKTS": [1, 1],
+        })
+        prepared, _ = prepare_chunk(frame)
+        numeric = prepared.loc[:, PORTABLE_CORE.numeric_columns].to_numpy(dtype=np.float64)
+        scaler = StandardScaler().fit(np.log1p(numeric))
+        _, provenance = build_graph(prepared, PORTABLE_CORE, scaler, IpIdMap(), "train")
+
+        self.assertEqual(provenance["flow_id"].tolist(), ["day-a.csv:7", "day-b.csv:7"])
+        self.assertTrue(provenance["flow_id"].is_unique)
+
 
 if __name__ == "__main__":
     unittest.main()
