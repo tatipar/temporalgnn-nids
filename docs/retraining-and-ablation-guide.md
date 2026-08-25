@@ -289,6 +289,11 @@ replaying endpoint registration for earlier windows in chronological order,
 and then rebuild any graph files written after the last published checkpoint.
 This must produce exactly the same IDs as an uninterrupted build.
 
+Provenance is profile-independent. The final audit must therefore read and
+validate each window's provenance table once, then reuse that in-memory table
+to audit the aligned graph tensor from every requested feature profile. It must
+also fail if the profiles do not contain exactly the same graph-window names.
+
 ### 3.6 Mandatory automated checks
 
 Implement these both as unit tests and as a graph-builder audit:

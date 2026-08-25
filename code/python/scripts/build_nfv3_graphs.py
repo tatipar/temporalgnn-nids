@@ -21,7 +21,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent))
 from utils.graph_construction import (  # noqa: E402
     DAY1, DAY2, END_TIME_COLUMN, DaySpec, IpIdMap, atomic_json_dump, atomic_torch_save,
-    audit_graph_file, build_graph, feature_preflight_audit, fit_scalers,
+    audit_graph_file, audit_provenance_file, build_graph, feature_preflight_audit, fit_scalers,
     prepare_chunk, required_columns, sha256_file, split_cutoffs, split_for_time,
 )
 from utils.graph_schema import get_feature_profile  # noqa: E402
@@ -151,9 +151,13 @@ def save_profile_artifacts(root: Path, profiles, scalers) -> None:
 
 
 def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight: dict[str, object], *, partial: bool) -> dict[str, object]:
-    """Audit every graph and verify timestamps per profile/split."""
+    """Audit aligned profile graphs while reading each provenance table once."""
+    profiles = tuple(profiles)
     result: dict[str, object] = {
-        "profiles": {},
+        "profiles": {
+            profile.name: {"splits": {}, "conservation_by_day": {}}
+            for profile in profiles
+        },
         "input_accounting": {
             key: preflight[key]
             for key in (
@@ -164,55 +168,75 @@ def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight:
         },
     }
     seen_flow_ids: set[str] = set()
-    first_profile_name = profiles[0].name
-    for profile in profiles:
-        profile_summary: dict[str, object] = {"splits": {}, "conservation_by_day": {}}
-        for day in days:
-            map_path = root / "mappings" / f"{day.name}_ip_to_id.json"
-            mapping = IpIdMap.from_file(map_path)
-            day_totals = Counter()
-            previous_split_max_timestamp: int | None = None
-            for split in day.split_names:
-                graph_dir = root / profile.name / split
-                if not graph_dir.exists():
-                    continue
-                files = sorted(graph_dir.glob("graph_*.pt"))
-                previous_timestamp = None
-                totals = Counter()
-                for graph_path in files:
-                    provenance_path = root / "provenance" / day.name / f"{graph_path.stem}.csv"
-                    audit, flow_ids = audit_graph_file(
-                        graph_path, profile, mapping, provenance_path, split,
-                    )
-                    if profile.name == first_profile_name:
-                        duplicates = seen_flow_ids.intersection(flow_ids)
-                        if duplicates:
-                            duplicate = next(iter(duplicates))
-                            raise AssertionError(f"Flow ID {duplicate} occurs in more than one graph.")
-                        seen_flow_ids.update(flow_ids)
-                    timestamp = int(graph_path.stem.split("_")[1])
-                    if previous_timestamp is not None and timestamp <= previous_timestamp:
-                        raise AssertionError(f"Graph timestamps are not strictly increasing in {graph_dir}.")
-                    previous_timestamp = timestamp
-                    totals.update(audit)
-                if files:
-                    split_min_timestamp = int(files[0].stem.split("_")[1])
-                    split_max_timestamp = int(files[-1].stem.split("_")[1])
-                    if previous_split_max_timestamp is not None and split_min_timestamp <= previous_split_max_timestamp:
-                        raise AssertionError(
-                            f"Graph splits are not chronologically ordered for {profile.name}/{day.name}."
-                        )
-                    previous_split_max_timestamp = split_max_timestamp
-                profile_summary["splits"][split] = dict(totals)
-                day_totals.update(totals)
+    for day in days:
+        map_path = root / "mappings" / f"{day.name}_ip_to_id.json"
+        mapping = IpIdMap.from_file(map_path)
+        day_totals = {profile.name: Counter() for profile in profiles}
+        previous_split_max_timestamp: int | None = None
 
-            expected = preflight["by_source_file"][day.source_file]
+        for split in day.split_names:
+            graph_dirs = {
+                profile.name: root / profile.name / split
+                for profile in profiles
+            }
+            files_by_profile = {
+                profile.name: sorted(graph_dirs[profile.name].glob("graph_*.pt"))
+                if graph_dirs[profile.name].exists() else []
+                for profile in profiles
+            }
+            if not any(graph_dirs[profile.name].exists() for profile in profiles):
+                continue
+
+            reference_names = [path.name for path in files_by_profile[profiles[0].name]]
+            for profile in profiles[1:]:
+                profile_names = [path.name for path in files_by_profile[profile.name]]
+                if profile_names != reference_names:
+                    raise AssertionError(
+                        f"Profile graph windows disagree for {day.name}/{split}: "
+                        f"{profiles[0].name} versus {profile.name}."
+                    )
+
+            timestamps = [int(Path(name).stem.split("_")[1]) for name in reference_names]
+            if any(current <= previous for previous, current in zip(timestamps, timestamps[1:])):
+                raise AssertionError(f"Graph timestamps are not strictly increasing for {day.name}/{split}.")
+            if timestamps:
+                if previous_split_max_timestamp is not None and timestamps[0] <= previous_split_max_timestamp:
+                    raise AssertionError(f"Graph splits are not chronologically ordered for {day.name}.")
+                previous_split_max_timestamp = timestamps[-1]
+
+            split_totals = {profile.name: Counter() for profile in profiles}
+            for graph_name, timestamp in zip(reference_names, timestamps):
+                provenance_path = root / "provenance" / day.name / f"{Path(graph_name).stem}.csv"
+                provenance, flow_ids = audit_provenance_file(
+                    provenance_path, mapping, split, timestamp,
+                )
+                duplicates = seen_flow_ids.intersection(flow_ids)
+                if duplicates:
+                    duplicate = next(iter(duplicates))
+                    raise AssertionError(f"Flow ID {duplicate} occurs in more than one graph.")
+                seen_flow_ids.update(flow_ids)
+
+                for profile in profiles:
+                    graph_path = graph_dirs[profile.name] / graph_name
+                    audit, _ = audit_graph_file(
+                        graph_path, profile, mapping, provenance_path, split,
+                        provenance=provenance,
+                    )
+                    split_totals[profile.name].update(audit)
+
+            for profile in profiles:
+                result["profiles"][profile.name]["splits"][split] = dict(split_totals[profile.name])
+                day_totals[profile.name].update(split_totals[profile.name])
+
+        expected = preflight["by_source_file"][day.source_file]
+        for profile in profiles:
+            totals = day_totals[profile.name]
             conservation = {
                 "source_file": day.source_file,
                 "expected_edges": int(expected["retained_rows"]),
-                "observed_edges": int(day_totals["edges"]),
+                "observed_edges": int(totals["edges"]),
                 "expected_positive_edges": int(expected["retained_positive_rows"]),
-                "observed_positive_edges": int(day_totals["positive_edges"]),
+                "observed_positive_edges": int(totals["positive_edges"]),
             }
             matches = (
                 conservation["observed_edges"] == conservation["expected_edges"]
@@ -223,8 +247,7 @@ def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight:
                 raise AssertionError(
                     f"Flow conservation failed for {profile.name}/{day.name}: {conservation}"
                 )
-            profile_summary["conservation_by_day"][day.name] = conservation
-        result["profiles"][profile.name] = profile_summary
+            result["profiles"][profile.name]["conservation_by_day"][day.name] = conservation
     return result
 
 

@@ -541,50 +541,30 @@ def build_graph(
     return data, provenance
 
 
-def audit_graph_file(
-    graph_path: Path,
-    profile: FeatureProfile,
-    mapping: IpIdMap,
+def audit_provenance_file(
     provenance_path: Path,
+    mapping: IpIdMap,
     expected_split: str,
-) -> tuple[dict[str, int], list[str]]:
-    """Audit one serialized graph against its schema, mapping, and provenance."""
-    data = torch.load(graph_path, weights_only=False)
-    edges = int(data.edge_index.shape[1])
-    if data.edge_attr.shape != (edges, profile.dimension) or data.y.shape[0] != edges:
-        raise AssertionError(f"Edge dimensions disagree in {graph_path}.")
-    if data.global_node_ids.numel() != data.num_nodes:
-        raise AssertionError(f"Node mapping dimensions disagree in {graph_path}.")
-    if not torch.isfinite(data.edge_attr).all() or not torch.isfinite(data.y).all():
-        raise AssertionError(f"Non-finite graph tensor found in {graph_path}.")
-    if data.feature_profile != profile.name or data.schema_hash != profile.sha256():
-        raise AssertionError(f"Profile schema metadata disagrees in {graph_path}.")
-    graph_timestamp = int(graph_path.stem.split("_")[1])
-    if int(data.timestamp) != graph_timestamp or int(data.window_end) != graph_timestamp:
-        raise AssertionError(f"Graph timestamp metadata disagrees in {graph_path}.")
-    if not all(int(node_id) in mapping.id_to_ip for node_id in data.global_node_ids.tolist()):
-        raise AssertionError(f"A graph ID cannot be decoded by its declared map in {graph_path}.")
+    expected_timestamp: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Read and audit one profile-independent per-window provenance table."""
     provenance = pd.read_csv(provenance_path)
     required_provenance = {
         "flow_id", "source_file", "source_row_id", "source_ip", "destination_ip",
+        "source_global_id", "destination_global_id",
         "edge_position", "flow_start_ms", "flow_end_ms", "decision_time_ms",
         "window_start_ms", "window_end_ms", "window_wait_ms", "split", "binary_target",
     }
     if not required_provenance.issubset(provenance.columns):
         raise AssertionError(f"Required provenance columns are missing in {provenance_path}.")
-    if len(provenance) != edges or not provenance["flow_id"].is_unique:
-        raise AssertionError(f"Provenance does not match graph edges in {provenance_path}.")
-    if not np.array_equal(provenance["edge_position"].to_numpy(), np.arange(edges)):
+    if not provenance["flow_id"].is_unique:
+        raise AssertionError(f"Flow IDs are not unique in {provenance_path}.")
+    if not np.array_equal(provenance["edge_position"].to_numpy(), np.arange(len(provenance))):
         raise AssertionError(f"Provenance edge positions are invalid in {provenance_path}.")
     if not provenance["split"].eq(expected_split).all():
         raise AssertionError(f"Provenance split disagrees in {provenance_path}.")
-    if not provenance["decision_time_ms"].eq(graph_timestamp).all():
+    if not provenance["decision_time_ms"].eq(expected_timestamp).all():
         raise AssertionError(f"Provenance decision time disagrees in {provenance_path}.")
-    if (
-        not provenance["window_start_ms"].eq(int(data.window_start)).all()
-        or not provenance["window_end_ms"].eq(int(data.window_end)).all()
-    ):
-        raise AssertionError(f"Provenance window metadata disagrees in {provenance_path}.")
     expected_flow_ids = (
         provenance["source_file"].astype(str)
         + ":"
@@ -603,16 +583,57 @@ def audit_graph_file(
     expected_wait = provenance["decision_time_ms"] - provenance["flow_end_ms"]
     if not np.allclose(provenance["window_wait_ms"], expected_wait, rtol=0, atol=1e-6):
         raise AssertionError(f"Window wait disagrees in {provenance_path}.")
+    sample = provenance.head(min(10, len(provenance)))
+    for row in sample.itertuples(index=False):
+        if mapping.id_to_ip[int(row.source_global_id)] != row.source_ip or mapping.id_to_ip[int(row.destination_global_id)] != row.destination_ip:
+            raise AssertionError(f"Sampled edge endpoint decoding failed in {provenance_path}.")
+    return provenance, provenance["flow_id"].astype(str).tolist()
+
+
+def audit_graph_file(
+    graph_path: Path,
+    profile: FeatureProfile,
+    mapping: IpIdMap,
+    provenance_path: Path,
+    expected_split: str,
+    provenance: pd.DataFrame | None = None,
+) -> tuple[dict[str, int], list[str]]:
+    """Audit one serialized graph against its schema, mapping, and provenance."""
+    graph_timestamp = int(graph_path.stem.split("_")[1])
+    if provenance is None:
+        provenance, flow_ids = audit_provenance_file(
+            provenance_path, mapping, expected_split, graph_timestamp,
+        )
+    else:
+        flow_ids = provenance["flow_id"].astype(str).tolist()
+
+    data = torch.load(graph_path, weights_only=False)
+    edges = int(data.edge_index.shape[1])
+    if len(provenance) != edges:
+        raise AssertionError(f"Provenance does not match graph edges in {provenance_path}.")
+    if data.edge_attr.shape != (edges, profile.dimension) or data.y.shape[0] != edges:
+        raise AssertionError(f"Edge dimensions disagree in {graph_path}.")
+    if data.global_node_ids.numel() != data.num_nodes:
+        raise AssertionError(f"Node mapping dimensions disagree in {graph_path}.")
+    if not torch.isfinite(data.edge_attr).all() or not torch.isfinite(data.y).all():
+        raise AssertionError(f"Non-finite graph tensor found in {graph_path}.")
+    if data.feature_profile != profile.name or data.schema_hash != profile.sha256():
+        raise AssertionError(f"Profile schema metadata disagrees in {graph_path}.")
+    if int(data.timestamp) != graph_timestamp or int(data.window_end) != graph_timestamp:
+        raise AssertionError(f"Graph timestamp metadata disagrees in {graph_path}.")
+    if not all(int(node_id) in mapping.id_to_ip for node_id in data.global_node_ids.tolist()):
+        raise AssertionError(f"A graph ID cannot be decoded by its declared map in {graph_path}.")
+    if (
+        not provenance["window_start_ms"].eq(int(data.window_start)).all()
+        or not provenance["window_end_ms"].eq(int(data.window_end)).all()
+    ):
+        raise AssertionError(f"Provenance window metadata disagrees in {provenance_path}.")
     if not np.array_equal(
         data.y.detach().cpu().numpy().astype(np.int8),
         provenance["binary_target"].to_numpy(dtype=np.int8),
     ):
         raise AssertionError(f"Graph targets disagree with provenance in {provenance_path}.")
-    sample = provenance.head(min(10, len(provenance)))
-    for row in sample.itertuples(index=False):
-        if mapping.id_to_ip[int(row.source_global_id)] != row.source_ip or mapping.id_to_ip[int(row.destination_global_id)] != row.destination_ip:
-            raise AssertionError(f"Sampled edge endpoint decoding failed in {provenance_path}.")
     return (
         {"graphs": 1, "edges": edges, "positive_edges": int(data.y.sum().item())},
-        provenance["flow_id"].astype(str).tolist(),
+        flow_ids,
     )

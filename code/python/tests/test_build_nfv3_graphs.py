@@ -8,11 +8,18 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
 
 from scripts.build_nfv3_graphs import (
-    iter_complete_windows, register_window_endpoints, save_day_checkpoint,
+    audit_output, iter_complete_windows, register_window_endpoints,
+    save_day_checkpoint,
 )
-from utils.graph_construction import DAY1, IpIdMap
+from utils.graph_construction import (
+    DAY1, DaySpec, IpIdMap, atomic_json_dump, atomic_torch_save, build_graph,
+    prepare_chunk,
+)
+from utils.graph_schema import NFV3_EXTENDED, PORTABLE_CORE
 
 
 class CompleteWindowIteratorTests(unittest.TestCase):
@@ -141,6 +148,73 @@ class ResumeMappingTests(unittest.TestCase):
         self.assertEqual(dump.call_count, 2)
         self.assertEqual(dump.call_args_list[0].args[1], map_path)
         self.assertEqual(dump.call_args_list[1].args, (state, state_path))
+
+
+class OutputAuditTests(unittest.TestCase):
+    def test_aligned_profiles_read_provenance_only_once(self) -> None:
+        frame = pd.DataFrame({column: [1.0] for column in NFV3_EXTENDED.numeric_columns})
+        frame["source_file"] = "day.csv"
+        frame["source_row_id"] = 7
+        frame["FLOW_START_MILLISECONDS"] = 29_998
+        frame["FLOW_END_MILLISECONDS"] = 29_999
+        frame["FLOW_DURATION_MILLISECONDS"] = 1
+        frame["IPV4_SRC_ADDR"] = "192.0.2.1"
+        frame["IPV4_DST_ADDR"] = "192.0.2.2"
+        frame["L4_DST_PORT"] = 443
+        frame["PROTOCOL"] = 6
+        frame["TCP_FLAGS"] = 18
+        frame["binary_target"] = 1
+        prepared, _ = prepare_chunk(frame)
+
+        profiles = (NFV3_EXTENDED, PORTABLE_CORE)
+        scalers = {}
+        for profile in profiles:
+            numeric = prepared.loc[:, profile.numeric_columns].to_numpy(dtype=np.float64)
+            scalers[profile.name] = StandardScaler().fit(np.log1p(numeric))
+
+        day = DaySpec("day1", "day.csv", ("train",))
+        mapping = IpIdMap()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provenance = None
+            for profile in profiles:
+                graph, provenance = build_graph(
+                    prepared, profile, scalers[profile.name], mapping, "train",
+                )
+                atomic_torch_save(
+                    graph,
+                    root / profile.name / "train" / "graph_0000000030000.pt",
+                )
+            provenance_path = root / "provenance" / day.name / "graph_0000000030000.csv"
+            provenance_path.parent.mkdir(parents=True)
+            provenance.to_csv(provenance_path, index=False)
+            atomic_json_dump(
+                mapping.payload(day.name),
+                root / "mappings" / f"{day.name}_ip_to_id.json",
+            )
+            preflight = {
+                "input_rows": 1,
+                "positive_rows": 1,
+                "retained_rows": 1,
+                "retained_positive_rows": 1,
+                "excluded_rows": 0,
+                "excluded_positive_rows": 0,
+                "by_source_file": {
+                    day.source_file: {"retained_rows": 1, "retained_positive_rows": 1},
+                },
+            }
+            real_read_csv = pd.read_csv
+            with patch(
+                "utils.graph_construction.pd.read_csv", side_effect=real_read_csv,
+            ) as read_csv:
+                audit = audit_output(root, profiles, (day,), preflight, partial=False)
+
+        self.assertEqual(read_csv.call_count, 1)
+        for profile in profiles:
+            self.assertEqual(
+                audit["profiles"][profile.name]["conservation_by_day"][day.name]["status"],
+                "passed",
+            )
 
 
 if __name__ == "__main__":
