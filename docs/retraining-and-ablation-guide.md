@@ -264,6 +264,15 @@ manifest records corrected-data and label-manifest hashes, feature-profile and
 scaler hashes, mapping hash, split cutoffs, window policy, row and class counts,
 and graph-file hashes.
 
+Store the individual SHA-256 and byte size of every graph and provenance file
+in a deterministic `artifact_checksums.json` index. The manifest must hash that
+index and report, per profile, a collection digest computed over the sorted
+triples `(relative_path, file_sha256, byte_size)`, plus file and byte counts.
+It must also record the exact feature-schema, scaler, and day-map files with
+their relative paths, SHA-256 values, and byte sizes. Compute graph and
+provenance hashes from the same serialized bytes used by the final audit so
+Drive files are not opened a second time solely for hashing.
+
 Do not serialize empty windows as graph files. Their elapsed time is represented
 by the difference between consecutive non-empty graph timestamps when an IP
 reappears. The builder audit must still verify that a gap produces no duplicate

@@ -203,12 +203,14 @@ class TemporalContractTests(unittest.TestCase):
             provenance_path = root / "graph_0000000030000.csv"
             atomic_torch_save(graph, graph_path)
             provenance.to_csv(provenance_path, index=False)
-            counts, flow_ids = audit_graph_file(
+            counts, flow_ids, artifact = audit_graph_file(
                 graph_path, PORTABLE_CORE, mapping, provenance_path, "train",
             )
 
         self.assertEqual(counts, {"graphs": 1, "edges": 1, "positive_edges": 1})
         self.assertEqual(flow_ids, ["day.csv:7"])
+        self.assertEqual(len(artifact["sha256"]), 64)
+        self.assertGreater(artifact["bytes"], 0)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections import Counter
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -546,9 +547,10 @@ def audit_provenance_file(
     mapping: IpIdMap,
     expected_split: str,
     expected_timestamp: int,
-) -> tuple[pd.DataFrame, list[str]]:
+) -> tuple[pd.DataFrame, list[str], dict[str, int | str]]:
     """Read and audit one profile-independent per-window provenance table."""
-    provenance = pd.read_csv(provenance_path)
+    serialized = provenance_path.read_bytes()
+    provenance = pd.read_csv(io.BytesIO(serialized))
     required_provenance = {
         "flow_id", "source_file", "source_row_id", "source_ip", "destination_ip",
         "source_global_id", "destination_global_id",
@@ -587,7 +589,11 @@ def audit_provenance_file(
     for row in sample.itertuples(index=False):
         if mapping.id_to_ip[int(row.source_global_id)] != row.source_ip or mapping.id_to_ip[int(row.destination_global_id)] != row.destination_ip:
             raise AssertionError(f"Sampled edge endpoint decoding failed in {provenance_path}.")
-    return provenance, provenance["flow_id"].astype(str).tolist()
+    return (
+        provenance,
+        provenance["flow_id"].astype(str).tolist(),
+        {"sha256": hashlib.sha256(serialized).hexdigest(), "bytes": len(serialized)},
+    )
 
 
 def audit_graph_file(
@@ -597,17 +603,18 @@ def audit_graph_file(
     provenance_path: Path,
     expected_split: str,
     provenance: pd.DataFrame | None = None,
-) -> tuple[dict[str, int], list[str]]:
+) -> tuple[dict[str, int], list[str], dict[str, int | str]]:
     """Audit one serialized graph against its schema, mapping, and provenance."""
     graph_timestamp = int(graph_path.stem.split("_")[1])
     if provenance is None:
-        provenance, flow_ids = audit_provenance_file(
+        provenance, flow_ids, _ = audit_provenance_file(
             provenance_path, mapping, expected_split, graph_timestamp,
         )
     else:
         flow_ids = provenance["flow_id"].astype(str).tolist()
 
-    data = torch.load(graph_path, weights_only=False)
+    serialized = graph_path.read_bytes()
+    data = torch.load(io.BytesIO(serialized), weights_only=False)
     edges = int(data.edge_index.shape[1])
     if len(provenance) != edges:
         raise AssertionError(f"Provenance does not match graph edges in {provenance_path}.")
@@ -636,4 +643,5 @@ def audit_graph_file(
     return (
         {"graphs": 1, "edges": edges, "positive_edges": int(data.y.sum().item())},
         flow_ids,
+        {"sha256": hashlib.sha256(serialized).hexdigest(), "bytes": len(serialized)},
     )

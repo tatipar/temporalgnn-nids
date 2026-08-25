@@ -8,6 +8,7 @@ a smoke build; omit it only after reviewing the generated audit and manifests.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -150,9 +151,74 @@ def save_profile_artifacts(root: Path, profiles, scalers) -> None:
         joblib.dump(scalers[profile.name], profile_root / "scaler.joblib")
 
 
-def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight: dict[str, object], *, partial: bool) -> dict[str, object]:
+def collection_checksum_summary(files: dict[str, dict[str, int | str]]) -> dict[str, int | str]:
+    """Hash an ordered path/file-hash index into one deterministic collection digest."""
+    digest = hashlib.sha256()
+    total_bytes = 0
+    for relative_path, record in sorted(files.items()):
+        total_bytes += int(record["bytes"])
+        line = json.dumps(
+            [relative_path, record["sha256"], int(record["bytes"])],
+            separators=(",", ":"),
+        )
+        digest.update(line.encode("utf-8") + b"\n")
+    return {"sha256": digest.hexdigest(), "files": len(files), "bytes": total_bytes}
+
+
+def file_artifact(root: Path, path: Path) -> dict[str, int | str]:
+    """Describe one exact artifact using a root-relative path and SHA-256."""
+    return {
+        "path": path.relative_to(root).as_posix(),
+        "sha256": sha256_file(path),
+        "bytes": path.stat().st_size,
+    }
+
+
+def build_artifact_summary(root: Path, profiles, days, checksums_path: Path, checksums: dict) -> dict[str, object]:
+    """Build the final reproducibility summary for immutable graph artifacts."""
+    return {
+        "collection_digest_contract": (
+            "sha256 of newline-delimited compact JSON arrays "
+            "[root_relative_path,file_sha256,byte_size] sorted by path"
+        ),
+        "checksum_index": file_artifact(root, checksums_path),
+        "feature_schemas": {
+            profile.name: file_artifact(root, root / profile.name / "feature_schema.json")
+            for profile in profiles
+        },
+        "scalers": {
+            profile.name: file_artifact(root, root / profile.name / "scaler.joblib")
+            for profile in profiles
+        },
+        "mappings": {
+            day.name: file_artifact(root, root / "mappings" / f"{day.name}_ip_to_id.json")
+            for day in days
+        },
+        "graph_collections": {
+            profile.name: collection_checksum_summary(checksums["graphs"][profile.name])
+            for profile in profiles
+        },
+        "provenance_collection": collection_checksum_summary(checksums["provenance"]),
+    }
+
+
+def audit_output(
+    root: Path,
+    profiles,
+    days: tuple[DaySpec, DaySpec],
+    preflight: dict[str, object],
+    *,
+    partial: bool,
+    artifact_checksums: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Audit aligned profile graphs while reading each provenance table once."""
     profiles = tuple(profiles)
+    if artifact_checksums is None:
+        artifact_checksums = {
+            "algorithm": "sha256",
+            "graphs": {profile.name: {} for profile in profiles},
+            "provenance": {},
+        }
     result: dict[str, object] = {
         "profiles": {
             profile.name: {"splits": {}, "conservation_by_day": {}}
@@ -168,6 +234,8 @@ def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight:
         },
     }
     seen_flow_ids: set[str] = set()
+    expected_graph_paths = {profile.name: set() for profile in profiles}
+    expected_provenance_paths: set[Path] = set()
     for day in days:
         map_path = root / "mappings" / f"{day.name}_ip_to_id.json"
         mapping = IpIdMap.from_file(map_path)
@@ -207,9 +275,12 @@ def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight:
             split_totals = {profile.name: Counter() for profile in profiles}
             for graph_name, timestamp in zip(reference_names, timestamps):
                 provenance_path = root / "provenance" / day.name / f"{Path(graph_name).stem}.csv"
-                provenance, flow_ids = audit_provenance_file(
+                expected_provenance_paths.add(provenance_path)
+                provenance, flow_ids, provenance_artifact = audit_provenance_file(
                     provenance_path, mapping, split, timestamp,
                 )
+                provenance_relative = provenance_path.relative_to(root).as_posix()
+                artifact_checksums["provenance"][provenance_relative] = provenance_artifact
                 duplicates = seen_flow_ids.intersection(flow_ids)
                 if duplicates:
                     duplicate = next(iter(duplicates))
@@ -218,10 +289,13 @@ def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight:
 
                 for profile in profiles:
                     graph_path = graph_dirs[profile.name] / graph_name
-                    audit, _ = audit_graph_file(
+                    expected_graph_paths[profile.name].add(graph_path)
+                    audit, _, graph_artifact = audit_graph_file(
                         graph_path, profile, mapping, provenance_path, split,
                         provenance=provenance,
                     )
+                    graph_relative = graph_path.relative_to(root).as_posix()
+                    artifact_checksums["graphs"][profile.name][graph_relative] = graph_artifact
                     split_totals[profile.name].update(audit)
 
             for profile in profiles:
@@ -248,6 +322,14 @@ def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight:
                     f"Flow conservation failed for {profile.name}/{day.name}: {conservation}"
                 )
             result["profiles"][profile.name]["conservation_by_day"][day.name] = conservation
+
+    actual_provenance_paths = set((root / "provenance").rglob("graph_*.csv"))
+    if actual_provenance_paths != expected_provenance_paths:
+        raise AssertionError("Provenance files do not exactly match the audited graph windows.")
+    for profile in profiles:
+        actual_graph_paths = set((root / profile.name).rglob("graph_*.pt"))
+        if actual_graph_paths != expected_graph_paths[profile.name]:
+            raise AssertionError(f"Unexpected or unaudited graph files found for {profile.name}.")
     return result
 
 
@@ -355,14 +437,32 @@ def main() -> None:
         save_day_checkpoint(mapping, map_path, day, state, state_path)
 
     is_partial = args.max_windows is not None
-    audit = audit_output(root, profiles, days, preflight, partial=is_partial)
+    artifact_checksums = {
+        "algorithm": "sha256",
+        "graphs": {profile.name: {} for profile in profiles},
+        "provenance": {},
+    }
+    audit = audit_output(
+        root, profiles, days, preflight, partial=is_partial,
+        artifact_checksums=artifact_checksums,
+    )
     audit["status"] = "partial" if is_partial else "passed"
+    checksums_path = root / "artifact_checksums.json"
+    atomic_json_dump(artifact_checksums, checksums_path)
+    audit["artifacts"] = build_artifact_summary(
+        root, profiles, days, checksums_path, artifact_checksums,
+    )
     atomic_json_dump(audit, root / "graph_audit.json")
     state["completed"] = not is_partial
     atomic_json_dump(state, state_path)
     if not is_partial:
         atomic_json_dump(
-            build_metadata | {"input_accounting": audit["input_accounting"], "audit": audit, "status": "passed"},
+            build_metadata | {
+                "input_accounting": audit["input_accounting"],
+                "artifacts": audit["artifacts"],
+                "audit": audit,
+                "status": "passed",
+            },
             root / "graph_manifest.json",
         )
     print(json.dumps({"output_root": str(root), "audit": str(root / "graph_audit.json"), "status": audit["status"]}, indent=2))

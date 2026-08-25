@@ -12,8 +12,9 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 
 from scripts.build_nfv3_graphs import (
-    audit_output, iter_complete_windows, register_window_endpoints,
-    save_day_checkpoint,
+    audit_output, build_artifact_summary, collection_checksum_summary,
+    iter_complete_windows, register_window_endpoints, save_day_checkpoint,
+    save_profile_artifacts,
 )
 from utils.graph_construction import (
     DAY1, DaySpec, IpIdMap, atomic_json_dump, atomic_torch_save, build_graph,
@@ -151,6 +152,21 @@ class ResumeMappingTests(unittest.TestCase):
 
 
 class OutputAuditTests(unittest.TestCase):
+    def test_collection_digest_is_order_independent_and_path_sensitive(self) -> None:
+        first = {
+            "b.pt": {"sha256": "b" * 64, "bytes": 20},
+            "a.pt": {"sha256": "a" * 64, "bytes": 10},
+        }
+        reordered = {"a.pt": first["a.pt"], "b.pt": first["b.pt"]}
+        renamed = {"c.pt": first["a.pt"], "b.pt": first["b.pt"]}
+
+        summary = collection_checksum_summary(first)
+
+        self.assertEqual(summary, collection_checksum_summary(reordered))
+        self.assertNotEqual(summary["sha256"], collection_checksum_summary(renamed)["sha256"])
+        self.assertEqual(summary["files"], 2)
+        self.assertEqual(summary["bytes"], 30)
+
     def test_aligned_profiles_read_provenance_only_once(self) -> None:
         frame = pd.DataFrame({column: [1.0] for column in NFV3_EXTENDED.numeric_columns})
         frame["source_file"] = "day.csv"
@@ -176,6 +192,7 @@ class OutputAuditTests(unittest.TestCase):
         mapping = IpIdMap()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            save_profile_artifacts(root, profiles, scalers)
             provenance = None
             for profile in profiles:
                 graph, provenance = build_graph(
@@ -204,13 +221,34 @@ class OutputAuditTests(unittest.TestCase):
                 },
             }
             real_read_csv = pd.read_csv
+            artifact_checksums = {
+                "algorithm": "sha256",
+                "graphs": {profile.name: {} for profile in profiles},
+                "provenance": {},
+            }
             with patch(
                 "utils.graph_construction.pd.read_csv", side_effect=real_read_csv,
             ) as read_csv:
-                audit = audit_output(root, profiles, (day,), preflight, partial=False)
+                audit = audit_output(
+                    root, profiles, (day,), preflight, partial=False,
+                    artifact_checksums=artifact_checksums,
+                )
+            checksums_path = root / "artifact_checksums.json"
+            atomic_json_dump(artifact_checksums, checksums_path)
+            artifact_summary = build_artifact_summary(
+                root, profiles, (day,), checksums_path, artifact_checksums,
+            )
+            orphan = root / "provenance" / day.name / "graph_0000000060000.csv"
+            orphan.write_text("orphan\n", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "exactly match"):
+                audit_output(root, profiles, (day,), preflight, partial=False)
 
         self.assertEqual(read_csv.call_count, 1)
+        self.assertEqual(artifact_summary["provenance_collection"]["files"], 1)
+        self.assertEqual(len(artifact_summary["checksum_index"]["sha256"]), 64)
         for profile in profiles:
+            self.assertEqual(artifact_summary["graph_collections"][profile.name]["files"], 1)
+            self.assertEqual(len(artifact_summary["scalers"][profile.name]["sha256"]), 64)
             self.assertEqual(
                 audit["profiles"][profile.name]["conservation_by_day"][day.name]["status"],
                 "passed",
