@@ -194,12 +194,19 @@ stream.
 Define each profile by name and ordered columns, store it as JSON, and use the
 same order for every model.
 
-`nfv3_extended` retains the enriched 33-dimensional profile:
+`nfv3_extended` uses an enriched 40-dimensional profile:
 
-- 20 numerical features: bytes, packets, duration, IAT, IP lengths,
-  retransmissions, TCP windows, flags, and TTL;
+- 19 numerical features: bytes, packets, duration, IAT, IP lengths,
+  retransmissions, TCP windows, and TTL;
 - eight destination-port categories;
-- five protocol categories.
+- five protocol categories;
+- eight unscaled TCP control-bit indicators: `FIN`, `SYN`, `RST`, `PSH`,
+  `ACK`, `URG`, `ECE`, and `CWR`.
+
+`TCP_FLAGS` is a cumulative bitmask, not an ordered magnitude. The extended
+profile therefore decodes it into the eight multi-hot indicators above; more
+than one bit may be active for an edge. These indicators remain in `{0,1}` and
+are not passed through `log1p` or `StandardScaler`.
 
 `portable_core` is the first minimal, deployable profile:
 
@@ -221,8 +228,10 @@ destination port zero; it must not be interpreted as a privileged service.
 Kerberos and LDAP. The schema JSON is authoritative for the explicit port lists
 in each named category.
 Ports must be valid integers in `0..65535`; protocol
-values must be valid integer IANA protocol numbers in `0..255`. Invalid values
-are data-quality failures, not members of an `other` category.
+values must be valid integer IANA protocol numbers in `0..255`. `TCP_FLAGS`
+must be an integer bitmask in `0..255`, and a non-zero mask on a non-TCP flow is
+treated as a data-quality failure. Invalid values are data-quality failures,
+not members of an `other` category.
 
 Generate and store separate graph collections for each profile in the same
 builder run. A profile's JSON schema must record its name, exact ordered

@@ -12,16 +12,22 @@ from sklearn.preprocessing import StandardScaler
 
 from utils.graph_construction import (
     IpIdMap, atomic_torch_save, audit_graph_file, build_graph,
-    endpoint_invalid_reason, feature_preflight_audit, prepare_chunk,
+    encode_edge_attributes, endpoint_invalid_reason, feature_preflight_audit,
+    prepare_chunk,
 )
-from utils.graph_schema import NFV3_EXTENDED, PORTABLE_CORE, destination_port_one_hot, protocol_one_hot
+from utils.graph_schema import (
+    NFV3_EXTENDED, PORTABLE_CORE, destination_port_one_hot, protocol_one_hot,
+    tcp_flags_multi_hot,
+)
 
 
 class GraphSchemaTests(unittest.TestCase):
     def test_profile_dimensions_are_frozen(self) -> None:
-        self.assertEqual(NFV3_EXTENDED.dimension, 33)
+        self.assertEqual(NFV3_EXTENDED.dimension, 40)
         self.assertEqual(PORTABLE_CORE.dimension, 18)
         self.assertNotIn("TCP_FLAGS", PORTABLE_CORE.numeric_columns)
+        self.assertNotIn("TCP_FLAGS", NFV3_EXTENDED.numeric_columns)
+        self.assertEqual(len(NFV3_EXTENDED.tcp_flag_columns), 8)
 
     def test_every_port_and_protocol_gets_one_category(self) -> None:
         ports = destination_port_one_hot(pd.Series([0, 8088, 8022, 445, 389, 11211, 25, 49152]))
@@ -36,6 +42,33 @@ class GraphSchemaTests(unittest.TestCase):
             destination_port_one_hot(pd.Series([80.5]))
         with self.assertRaises(ValueError):
             protocol_one_hot(pd.Series([17.5]))
+
+    def test_tcp_flags_are_decoded_as_independent_bits(self) -> None:
+        flags = tcp_flags_multi_hot(pd.Series([0, 18, 24, 31, 32, 255]))
+        self.assertEqual(flags.shape, (6, 8))
+        self.assertEqual(flags[1].tolist(), [0, 1, 0, 0, 1, 0, 0, 0])
+        self.assertEqual(flags[2].tolist(), [0, 0, 0, 1, 1, 0, 0, 0])
+        self.assertEqual(int(flags[3].sum()), 5)
+        self.assertEqual(int(flags[4].sum()), 1)
+        self.assertTrue((flags[5] == 1).all())
+
+    def test_tcp_flag_validation_rejects_non_bitmask_values(self) -> None:
+        for invalid in (-1, 1.5, 256, np.nan):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                tcp_flags_multi_hot(pd.Series([invalid]))
+
+    def test_extended_profile_keeps_tcp_flag_bits_unscaled(self) -> None:
+        frame = pd.DataFrame({column: [1.0] for column in NFV3_EXTENDED.numeric_columns})
+        frame["L4_DST_PORT"] = 443
+        frame["PROTOCOL"] = 6
+        frame["TCP_FLAGS"] = 18
+        numeric = frame.loc[:, NFV3_EXTENDED.numeric_columns].to_numpy(dtype=np.float64)
+        scaler = StandardScaler().fit(np.log1p(numeric))
+
+        encoded = encode_edge_attributes(frame, NFV3_EXTENDED, scaler)
+
+        self.assertEqual(encoded.shape, (1, 40))
+        self.assertEqual(encoded[0, -8:].tolist(), [0, 1, 0, 0, 1, 0, 0, 0])
 
 
 class TemporalContractTests(unittest.TestCase):

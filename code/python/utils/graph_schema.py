@@ -18,7 +18,7 @@ NUMERIC_EXTENDED_COLUMNS = (
     "SRC_TO_DST_IAT_STDDEV", "DST_TO_SRC_IAT_STDDEV",
     "MIN_IP_PKT_LEN", "MAX_IP_PKT_LEN",
     "RETRANSMITTED_IN_PKTS", "RETRANSMITTED_OUT_PKTS",
-    "TCP_WIN_MAX_IN", "TCP_WIN_MAX_OUT", "TCP_FLAGS", "MIN_TTL", "MAX_TTL",
+    "TCP_WIN_MAX_IN", "TCP_WIN_MAX_OUT", "MIN_TTL", "MAX_TTL",
 )
 
 NUMERIC_PORTABLE_CORE_COLUMNS = (
@@ -36,6 +36,22 @@ PROTOCOL_CATEGORY_COLUMNS = (
     "protocol_tcp", "protocol_udp", "protocol_icmp", "protocol_igmp",
     "protocol_other",
 )
+
+TCP_FLAG_COLUMNS = (
+    "tcp_flag_fin", "tcp_flag_syn", "tcp_flag_rst", "tcp_flag_psh",
+    "tcp_flag_ack", "tcp_flag_urg", "tcp_flag_ece", "tcp_flag_cwr",
+)
+
+TCP_FLAG_MASKS = {
+    "tcp_flag_fin": 0x01,
+    "tcp_flag_syn": 0x02,
+    "tcp_flag_rst": 0x04,
+    "tcp_flag_psh": 0x08,
+    "tcp_flag_ack": 0x10,
+    "tcp_flag_urg": 0x20,
+    "tcp_flag_ece": 0x40,
+    "tcp_flag_cwr": 0x80,
+}
 
 WEB_HTTP_PROXY_PORTS = (80, 81, 443, 3128, 8000, 8008, 8080, 8081, 8082, 8084, 8088, 8090, 8181, 8443, 8545, 8888)
 ADMIN_REMOTE_PORTS = (22, 23, 222, 1723, 2222, 2323, 3389, 3390, 3394, 5555, 5900, 5901, 5902, 5903, 5985, 5986, 8022)
@@ -68,11 +84,17 @@ class FeatureProfile:
     numeric_columns: tuple[str, ...]
     port_category_columns: tuple[str, ...] = PORT_CATEGORY_COLUMNS
     protocol_category_columns: tuple[str, ...] = PROTOCOL_CATEGORY_COLUMNS
+    tcp_flag_columns: tuple[str, ...] = ()
     numeric_transform: str = "log1p_then_standard_scaler"
 
     @property
     def edge_attr_columns(self) -> tuple[str, ...]:
-        return self.numeric_columns + self.port_category_columns + self.protocol_category_columns
+        return (
+            self.numeric_columns
+            + self.port_category_columns
+            + self.protocol_category_columns
+            + self.tcp_flag_columns
+        )
 
     @property
     def dimension(self) -> int:
@@ -83,6 +105,10 @@ class FeatureProfile:
         payload["numeric_columns"] = list(self.numeric_columns)
         payload["port_category_columns"] = list(self.port_category_columns)
         payload["protocol_category_columns"] = list(self.protocol_category_columns)
+        if self.tcp_flag_columns:
+            payload["tcp_flag_columns"] = list(self.tcp_flag_columns)
+        else:
+            payload.pop("tcp_flag_columns")
         payload["edge_attr_columns"] = list(self.edge_attr_columns)
         payload["dimension"] = self.dimension
         payload["port_encoding"] = {
@@ -92,6 +118,12 @@ class FeatureProfile:
             "dst_port_not_applicable_or_zero": "port 0",
         }
         payload["protocol_encoding"] = PROTOCOL_ROLE_VALUES
+        if self.tcp_flag_columns:
+            payload["tcp_flag_encoding"] = {
+                "source_column": "TCP_FLAGS",
+                "representation": "multi_hot_bitmask_no_scaling",
+                "bit_masks": {name: TCP_FLAG_MASKS[name] for name in self.tcp_flag_columns},
+            }
         return payload
 
     def sha256(self) -> str:
@@ -102,6 +134,7 @@ class FeatureProfile:
 NFV3_EXTENDED = FeatureProfile(
     name="nfv3_extended",
     numeric_columns=NUMERIC_EXTENDED_COLUMNS,
+    tcp_flag_columns=TCP_FLAG_COLUMNS,
 )
 
 PORTABLE_CORE = FeatureProfile(
@@ -164,6 +197,18 @@ def destination_port_one_hot(values: pd.Series) -> np.ndarray:
     if not (encoded.sum(axis=1) == 1).all():
         raise AssertionError("Destination-port categories must form an exhaustive one-hot partition.")
     return encoded
+
+
+def tcp_flags_multi_hot(values: pd.Series) -> np.ndarray:
+    """Decode an unsigned 8-bit TCP control-bit mask without scaling it."""
+    flags = pd.to_numeric(values, errors="coerce")
+    if flags.isna().any() or not np.isfinite(flags).all():
+        raise ValueError("TCP_FLAGS contains missing, non-numeric, or non-finite values.")
+    if (np.floor(flags) != flags).any() or (flags < 0).any() or (flags > 255).any():
+        raise ValueError("TCP_FLAGS must contain integer bitmasks in the range 0..255.")
+    masks = np.asarray(tuple(TCP_FLAG_MASKS[name] for name in TCP_FLAG_COLUMNS), dtype=np.uint16)
+    integer_flags = flags.to_numpy(dtype=np.uint16)
+    return ((integer_flags[:, None] & masks[None, :]) != 0).astype(np.float32)
 
 
 def validate_numeric_frame(frame: pd.DataFrame, profile: FeatureProfile) -> np.ndarray:

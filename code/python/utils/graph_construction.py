@@ -26,7 +26,7 @@ from torch_geometric.data import Data
 from .graph_schema import (
     FeatureProfile, PORT_CATEGORY_COLUMNS, PROTOCOL_CATEGORY_COLUMNS,
     get_feature_profile, destination_port_one_hot, protocol_one_hot,
-    validate_numeric_frame,
+    tcp_flags_multi_hot, validate_numeric_frame,
 )
 
 
@@ -38,6 +38,7 @@ SOURCE_IP_COLUMN = "IPV4_SRC_ADDR"
 DESTINATION_IP_COLUMN = "IPV4_DST_ADDR"
 DESTINATION_PORT_COLUMN = "L4_DST_PORT"
 PROTOCOL_COLUMN = "PROTOCOL"
+TCP_FLAGS_COLUMN = "TCP_FLAGS"
 TARGET_COLUMN = "binary_target"
 SOURCE_FILE_COLUMN = "source_file"
 SOURCE_ROW_ID_COLUMN = "source_row_id"
@@ -155,6 +156,8 @@ def required_columns(profiles: Iterable[FeatureProfile]) -> list[str]:
     }
     for profile in profiles:
         columns.update(profile.numeric_columns)
+        if profile.tcp_flag_columns:
+            columns.add(TCP_FLAGS_COLUMN)
     return sorted(columns)
 
 
@@ -263,7 +266,10 @@ def encode_edge_attributes(frame: pd.DataFrame, profile: FeatureProfile, scaler:
     numerical = scaler.transform(np.log1p(validate_numeric_frame(frame, profile))).astype(np.float32)
     ports = destination_port_one_hot(frame[DESTINATION_PORT_COLUMN])
     protocols = protocol_one_hot(frame[PROTOCOL_COLUMN])
-    edge_attr = np.concatenate((numerical, ports, protocols), axis=1)
+    components = [numerical, ports, protocols]
+    if profile.tcp_flag_columns:
+        components.append(tcp_flags_multi_hot(frame[TCP_FLAGS_COLUMN]))
+    edge_attr = np.concatenate(components, axis=1)
     if edge_attr.shape[1] != profile.dimension:
         raise AssertionError(f"Unexpected {profile.name} feature dimension {edge_attr.shape[1]}.")
     if not np.isfinite(edge_attr).all():
@@ -304,6 +310,8 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
         "invalid_destination_endpoint_reasons": Counter(),
         "invalid_port_rows": 0,
         "invalid_protocol_rows": 0,
+        "invalid_tcp_flags_rows": 0,
+        "non_tcp_nonzero_tcp_flags_rows": 0,
         "invalid_binary_target_rows": 0,
         "invalid_time_or_duration_rows": 0,
         "invalid_time_or_duration_positive_rows": 0,
@@ -416,6 +424,17 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
             zero_ports = port_valid & port.eq(0)
             summary["port_zero_by_protocol"].update(protocol_labels.loc[zero_ports].tolist())
 
+            if any(profile.tcp_flag_columns for profile in profiles):
+                tcp_flags = pd.to_numeric(chunk[TCP_FLAGS_COLUMN], errors="coerce")
+                tcp_flags_valid = (
+                    tcp_flags.notna() & np.isfinite(tcp_flags)
+                    & (np.floor(tcp_flags) == tcp_flags) & tcp_flags.between(0, 255)
+                )
+                summary["invalid_tcp_flags_rows"] += int((~tcp_flags_valid).sum())
+                summary["non_tcp_nonzero_tcp_flags_rows"] += int(
+                    (tcp_flags_valid & tcp_flags.ne(0) & ~protocol.eq(6)).sum()
+                )
+
             for profile in profiles:
                 numeric = chunk.loc[:, profile.numeric_columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=np.float64)
                 valid_numeric_rows = np.isfinite(numeric).all(axis=1) & (numeric >= 0).all(axis=1)
@@ -424,6 +443,8 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
     failed = (
         int(summary["invalid_port_rows"]) > 0
         or int(summary["invalid_protocol_rows"]) > 0
+        or int(summary["invalid_tcp_flags_rows"]) > 0
+        or int(summary["non_tcp_nonzero_tcp_flags_rows"]) > 0
         or int(summary["invalid_binary_target_rows"]) > 0
         or int(summary["invalid_time_or_duration_rows"]) > 0
         or int(summary["flow_end_difference_gt_1ms_rows"]) > 0
@@ -445,6 +466,8 @@ def feature_preflight_audit(input_csvs: Iterable[Path], profiles: Iterable[Featu
         "invalid_destination_endpoint_reasons": _counter_payload(summary["invalid_destination_endpoint_reasons"]),
         "invalid_port_rows": int(summary["invalid_port_rows"]),
         "invalid_protocol_rows": int(summary["invalid_protocol_rows"]),
+        "invalid_tcp_flags_rows": int(summary["invalid_tcp_flags_rows"]),
+        "non_tcp_nonzero_tcp_flags_rows": int(summary["non_tcp_nonzero_tcp_flags_rows"]),
         "invalid_binary_target_rows": int(summary["invalid_binary_target_rows"]),
         "invalid_time_or_duration_rows": int(summary["invalid_time_or_duration_rows"]),
         "invalid_time_or_duration_positive_rows": int(summary["invalid_time_or_duration_positive_rows"]),
