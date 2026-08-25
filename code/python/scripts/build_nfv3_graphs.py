@@ -27,6 +27,9 @@ from utils.graph_construction import (  # noqa: E402
 from utils.graph_schema import get_feature_profile  # noqa: E402
 
 
+DEFAULT_CHECKPOINT_EVERY_WINDOWS = 200
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-csv", action="append", type=Path, required=True,
@@ -39,6 +42,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--day1-source-file", default=DAY1.source_file)
     parser.add_argument("--day2-source-file", default=DAY2.source_file)
     parser.add_argument("--chunksize", type=int, default=250_000)
+    parser.add_argument("--checkpoint-every", type=int, default=DEFAULT_CHECKPOINT_EVERY_WINDOWS,
+                        help="Persist the day mapping and build state every N newly built windows (default: 200).")
     parser.add_argument("--max-windows", type=int, default=None,
                         help="Stop after this many windows per day for a smoke build.")
     parser.add_argument("--preflight-only", action="store_true",
@@ -111,6 +116,30 @@ def load_state(path: Path) -> dict[str, object]:
     if not path.exists():
         return {"days": {}, "completed": False}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def register_window_endpoints(mapping: IpIdMap, group: pd.DataFrame) -> None:
+    """Replay the exact append-only ID assignment performed by ``build_graph``."""
+    for ip in group["source_ip"]:
+        mapping.id_for(ip)
+    for ip in group["destination_ip"]:
+        mapping.id_for(ip)
+
+
+def save_day_checkpoint(
+    mapping: IpIdMap,
+    map_path: Path,
+    day: DaySpec,
+    state: dict[str, object],
+    state_path: Path,
+) -> None:
+    """Persist a recoverable mapping/state pair, publishing state last.
+
+    Resume always reconstructs the mapping chronologically from the input, so
+    a crash after the map write but before the state write is harmless.
+    """
+    atomic_json_dump(mapping.payload(day.name), map_path)
+    atomic_json_dump(state, state_path)
 
 
 def save_profile_artifacts(root: Path, profiles, scalers) -> None:
@@ -201,8 +230,12 @@ def audit_output(root: Path, profiles, days: tuple[DaySpec, DaySpec], preflight:
 
 def main() -> None:
     args = parse_args()
-    if args.chunksize <= 0 or (args.max_windows is not None and args.max_windows <= 0):
-        raise ValueError("chunksize and max-windows must be positive.")
+    if (
+        args.chunksize <= 0
+        or args.checkpoint_every <= 0
+        or (args.max_windows is not None and args.max_windows <= 0)
+    ):
+        raise ValueError("chunksize, checkpoint-every, and max-windows must be positive.")
     input_csvs = [path.resolve() for path in args.input_csv]
     for path in [*input_csvs, args.corrected_manifest]:
         if not path.is_file():
@@ -253,17 +286,23 @@ def main() -> None:
         "window_policy": "flow_end_in_half_open_window; decision_time_is_window_close",
         "flow_end_column": END_TIME_COLUMN,
         "day1_cutoffs": day1_cutoffs,
+        "checkpoint_every_windows": args.checkpoint_every,
     }
     atomic_json_dump(build_metadata, root / "build_configuration.json")
 
     for day in days:
         day_state = state.setdefault("days", {}).setdefault(day.name, {})
         map_path = root / "mappings" / f"{day.name}_ip_to_id.json"
-        mapping = IpIdMap.from_file(map_path) if args.resume and map_path.exists() else IpIdMap()
+        # Rebuild from the chronological stream even on resume. Loading a map
+        # checkpoint and then skipping earlier windows can silently change IDs
+        # when the map and state were persisted at different instants.
+        mapping = IpIdMap()
         last_completed = day_state.get("last_completed_decision_time_ms") if args.resume else None
         processed = 0
+        since_checkpoint = 0
         for decision_time, group in iter_complete_windows(input_csvs, day, usecols, args.chunksize):
             if last_completed is not None and decision_time <= int(last_completed):
+                register_window_endpoints(mapping, group)
                 continue
             split = split_for_time(day, decision_time, day1_cutoffs)
             graph_name = f"graph_{decision_time:013d}.pt"
@@ -278,14 +317,19 @@ def main() -> None:
             provenance_path = root / "provenance" / day.name / provenance_name
             provenance_path.parent.mkdir(parents=True, exist_ok=True)
             provenance.to_csv(provenance_path, index=False)
-            atomic_json_dump(mapping.payload(day.name), map_path)
             day_state["last_completed_decision_time_ms"] = decision_time
             state["completed"] = False
-            atomic_json_dump(state, state_path)
             processed += 1
+            since_checkpoint += 1
+            if since_checkpoint >= args.checkpoint_every:
+                save_day_checkpoint(mapping, map_path, day, state, state_path)
+                since_checkpoint = 0
             if args.max_windows is not None and processed >= args.max_windows:
                 print(f"Stopped after {processed} windows for {day.name} as requested.")
                 break
+        # Flush at every day boundary and after an intentional smoke stop,
+        # including when resume only replayed already completed windows.
+        save_day_checkpoint(mapping, map_path, day, state, state_path)
 
     is_partial = args.max_windows is not None
     audit = audit_output(root, profiles, days, preflight, partial=is_partial)

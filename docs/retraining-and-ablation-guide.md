@@ -281,6 +281,14 @@ resumable checkpoint/state for long Drive-backed runs, and publish the final
 manifest only after all audits pass. Historical graph-creation and entropy
 notebooks are not valid production builders.
 
+To avoid rewriting a growing IP map for every graph, persist the day-scoped
+IP-to-ID map together with build state every 200 newly built windows and at
+every day boundary. Publish the map before the state. Resume must treat the
+saved decision time as authoritative, reconstruct the append-only map by
+replaying endpoint registration for earlier windows in chronological order,
+and then rebuild any graph files written after the last published checkpoint.
+This must produce exactly the same IDs as an uninterrupted build.
+
 ### 3.6 Mandatory automated checks
 
 Implement these both as unit tests and as a graph-builder audit:
