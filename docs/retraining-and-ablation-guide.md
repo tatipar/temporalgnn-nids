@@ -157,6 +157,10 @@ requires a separate streaming or replay study.
   then round each cutoff upward to the next 30-second window boundary. With
   the convention `decision_time < cutoff`, this preserves the intended split
   membership while making every split boundary a graph boundary.
+- Record the Day-1 minimum, nearest-rank 0.1 and 99.9 percentiles, maximum, and
+  the distance from each percentile to its corresponding extreme. These are
+  diagnostics, not inputs to the split calculation: an unusually large upper
+  tail must be investigated before accepting max-span-derived cutoffs.
 - Fit `StandardScaler` only with flows available in train.
 - Apply the frozen scaler to validation, Test1, and Test2.
 - A flow ending after the train/validation cutoff belongs to the split determined
@@ -178,6 +182,11 @@ stream.
   appears while processing that day's flows in chronological order. Never
   reuse or reassign an ID. This mirrors online operation without exposing
   future flow content to an earlier graph.
+- An IP absent from intervening non-empty windows is absent from those local
+  graphs, but receives its original global ID when it reappears later in the
+  same day. The builder supplies that stable key and the elapsed timestamps;
+  a temporal model must explicitly define whether it retains, decays, or
+  resets the corresponding hidden state across the gap.
 - Persist the exact final map used by the builder in both directions
   (`ip_to_id` and `id_to_ip`), as JSON plus a human-readable two-column table.
   Record their hashes, entry counts, creation policy, and IP-normalization
@@ -264,6 +273,13 @@ manifest records corrected-data and label-manifest hashes, feature-profile and
 scaler hashes, mapping hash, split cutoffs, window policy, row and class counts,
 and graph-file hashes.
 
+Graphs are directed multigraphs. Each retained flow contributes one
+source-to-destination edge in `edge_index`; the builder does not synthesize a
+reverse edge. A reverse flow is present only when it exists as its own input
+flow. Models that require bidirectional message passing must add reverse edges
+internally and document that model policy, without changing the shared graph
+collection.
+
 Store the individual SHA-256 and byte size of every graph and provenance file
 in a deterministic `artifact_checksums.json` index. The manifest must hash that
 index and report, per profile, a collection digest computed over the sorted
@@ -274,9 +290,11 @@ provenance hashes from the same serialized bytes used by the final audit so
 Drive files are not opened a second time solely for hashing.
 
 Do not serialize empty windows as graph files. Their elapsed time is represented
-by the difference between consecutive non-empty graph timestamps when an IP
-reappears. The builder audit must still verify that a gap produces no duplicate
-or misassigned flow window.
+by the difference between consecutive non-empty graph timestamps. When an IP
+reappears, its day-scoped global ID is unchanged. The builder audit must still
+verify that a gap produces no duplicate or misassigned flow window. Stateless
+models need no special handling; temporal models must consume the timestamp
+gap and apply their declared hidden-state gap/reset policy.
 
 Do not persist an all-ones dummy node-feature matrix. The new graph schema has
 no node attributes: node identity for StaticGNN and ST-GNN is induced from

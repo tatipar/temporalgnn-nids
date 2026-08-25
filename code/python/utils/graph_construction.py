@@ -191,12 +191,29 @@ def prepare_chunk(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     return result, counts
 
 
-def split_cutoffs(input_csvs: Iterable[Path], day: DaySpec, chunksize: int, usecols: list[str]) -> dict[str, int | None]:
-    """Compute Day-1 decision-time cutoffs after filtering invalid source rows."""
+def nearest_rank_from_counts(counts: Counter[int], quantile: float) -> int:
+    """Return a deterministic nearest-rank quantile from integer value counts."""
+    total = sum(int(count) for count in counts.values())
+    if total <= 0:
+        raise ValueError("Cannot compute a quantile from an empty distribution.")
+    if not 0.0 < quantile <= 1.0:
+        raise ValueError("quantile must be in (0, 1].")
+    target_rank = max(1, int(np.ceil(quantile * total)))
+    cumulative = 0
+    for value, count in sorted(counts.items()):
+        cumulative += int(count)
+        if cumulative >= target_rank:
+            return int(value)
+    raise AssertionError("Nearest-rank quantile traversal did not reach its target rank.")
+
+
+def split_cutoffs(input_csvs: Iterable[Path], day: DaySpec, chunksize: int, usecols: list[str]) -> dict[str, object]:
+    """Compute Day-1 decision-time cutoffs and tail diagnostics after filtering."""
     if not day.is_day1:
         return {"train_end_ms": None, "val_end_ms": None}
     minimum: int | None = None
     maximum: int | None = None
+    decision_time_counts: Counter[int] = Counter()
     for path in input_csvs:
         for chunk in pd.read_csv(path, usecols=usecols, chunksize=chunksize, low_memory=False):
             chunk = chunk.loc[chunk[SOURCE_FILE_COLUMN].eq(day.source_file)]
@@ -209,6 +226,10 @@ def split_cutoffs(input_csvs: Iterable[Path], day: DaySpec, chunksize: int, usec
             current_min, current_max = int(values.min()), int(values.max())
             minimum = current_min if minimum is None else min(minimum, current_min)
             maximum = current_max if maximum is None else max(maximum, current_max)
+            decision_time_counts.update({
+                int(value): int(count)
+                for value, count in values.value_counts(sort=False).items()
+            })
     if minimum is None or maximum is None or maximum <= minimum:
         raise ValueError(f"Could not derive valid Day-1 decision-time bounds for {day.source_file}.")
     duration = maximum - minimum
@@ -218,15 +239,28 @@ def split_cutoffs(input_csvs: Iterable[Path], day: DaySpec, chunksize: int, usec
     val_end = ((raw_val_end + WINDOW_MS - 1) // WINDOW_MS) * WINDOW_MS
     if not minimum < train_end < val_end <= maximum + WINDOW_MS:
         raise AssertionError("Window-aligned Day-1 split cutoffs are invalid.")
+    percentile_0_1 = nearest_rank_from_counts(decision_time_counts, 0.001)
+    percentile_99_9 = nearest_rank_from_counts(decision_time_counts, 0.999)
     return {
         "train_end_ms": train_end,
         "val_end_ms": val_end,
         "raw_train_end_ms": raw_train_end,
         "raw_val_end_ms": raw_val_end,
+        "decision_time_distribution": {
+            "rows": sum(decision_time_counts.values()),
+            "minimum_ms": minimum,
+            "p0_1_ms": percentile_0_1,
+            "p99_9_ms": percentile_99_9,
+            "maximum_ms": maximum,
+            "lower_tail_span_ms": percentile_0_1 - minimum,
+            "upper_tail_span_ms": maximum - percentile_99_9,
+            "full_span_ms": maximum - minimum,
+            "quantile_method": "nearest_rank",
+        },
     }
 
 
-def split_for_time(day: DaySpec, decision_time_ms: int, cutoffs: dict[str, int | None]) -> str:
+def split_for_time(day: DaySpec, decision_time_ms: int, cutoffs: dict[str, object]) -> str:
     """Assign one graph window to its declared chronological split."""
     if not day.is_day1:
         return "test2"
@@ -237,7 +271,7 @@ def split_for_time(day: DaySpec, decision_time_ms: int, cutoffs: dict[str, int |
     return "test1"
 
 
-def fit_scalers(input_csvs: Iterable[Path], day: DaySpec, profiles: Iterable[FeatureProfile], cutoffs: dict[str, int | None], chunksize: int) -> dict[str, StandardScaler]:
+def fit_scalers(input_csvs: Iterable[Path], day: DaySpec, profiles: Iterable[FeatureProfile], cutoffs: dict[str, object], chunksize: int) -> dict[str, StandardScaler]:
     """Fit one scaler per profile using only Day-1 train flows."""
     if not day.is_day1:
         raise ValueError("Only Day 1 has a training split for scaler fitting.")

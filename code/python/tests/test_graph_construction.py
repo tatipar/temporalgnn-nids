@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import unittest
 from pathlib import Path
 import tempfile
@@ -13,7 +14,7 @@ from sklearn.preprocessing import StandardScaler
 from utils.graph_construction import (
     IpIdMap, atomic_torch_save, audit_graph_file, build_graph,
     encode_edge_attributes, endpoint_invalid_reason, feature_preflight_audit,
-    prepare_chunk,
+    nearest_rank_from_counts, prepare_chunk,
 )
 from utils.graph_schema import (
     NFV3_EXTENDED, PORTABLE_CORE, destination_port_one_hot, protocol_one_hot,
@@ -72,6 +73,11 @@ class GraphSchemaTests(unittest.TestCase):
 
 
 class TemporalContractTests(unittest.TestCase):
+    def test_cutoff_tail_quantiles_expose_an_isolated_maximum(self) -> None:
+        counts = Counter({100: 1, 200: 998, 10_000: 1})
+        self.assertEqual(nearest_rank_from_counts(counts, 0.001), 100)
+        self.assertEqual(nearest_rank_from_counts(counts, 0.999), 200)
+
     def test_long_flow_is_assigned_once_at_its_completion_window(self) -> None:
         frame = pd.DataFrame({
             "FLOW_START_MILLISECONDS": [13 * 3_600_000 + 57 * 60_000],
