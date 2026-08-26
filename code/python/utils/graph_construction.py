@@ -1,8 +1,10 @@
 """Auditable NF-v3 temporal graph construction utilities.
 
 The builder assigns a completed flow to exactly one 30-second graph window: the
-window containing the flow end. It intentionally has no dependency on labels
-for feature construction, split selection, or IP-to-ID mapping.
+window containing the flow end. Feature construction and IP-to-ID mapping do
+not depend on labels. The frozen Day-1 split policy is episode-aware: its
+cutoffs were selected once from corrected-label temporal support, before model
+training, and are not recomputed from each input or model result.
 """
 
 from __future__ import annotations
@@ -44,6 +46,14 @@ TARGET_COLUMN = "binary_target"
 SOURCE_FILE_COLUMN = "source_file"
 SOURCE_ROW_ID_COLUMN = "source_row_id"
 
+DAY1_EPISODE_SPLIT_POLICY = "day1_episode_aware_v1"
+DAY1_TRAIN_END_MS = 1_519_832_640_000  # 2018-02-28 15:44:00 UTC
+DAY1_VAL_END_MS = 1_519_836_960_000  # 2018-02-28 16:56:00 UTC
+DAY1_SPLIT_CUTOFF_BASIS = (
+    "fixed midpoints of corrected-positive-free gaps between three Day-1 "
+    "activity episodes; selected before model training"
+)
+
 
 @dataclass(frozen=True)
 class DaySpec:
@@ -52,16 +62,28 @@ class DaySpec:
     name: str
     source_file: str
     split_names: tuple[str, ...]
-    train_ratio: float | None = None
-    validation_ratio: float | None = None
+    split_policy: str = "single_full_day_holdout_v1"
+    train_end_ms: int | None = None
+    val_end_ms: int | None = None
 
     @property
     def is_day1(self) -> bool:
-        return self.train_ratio is not None and self.validation_ratio is not None
+        return self.train_end_ms is not None and self.val_end_ms is not None
 
 
-DAY1 = DaySpec("day1", "cicids2018v3_wed2802.csv", ("train", "val", "test1"), 0.70, 0.15)
-DAY2 = DaySpec("day2", "cicids2018v3_thu0103.csv", ("test2",))
+DAY1 = DaySpec(
+    name="day1",
+    source_file="cicids2018v3_wed2802.csv",
+    split_names=("train", "val", "test1"),
+    split_policy=DAY1_EPISODE_SPLIT_POLICY,
+    train_end_ms=DAY1_TRAIN_END_MS,
+    val_end_ms=DAY1_VAL_END_MS,
+)
+DAY2 = DaySpec(
+    name="day2",
+    source_file="cicids2018v3_thu0103.csv",
+    split_names=("test2",),
+)
 
 
 def sha256_file(path: Path, block_size: int = 1024 * 1024) -> str:
@@ -208,9 +230,13 @@ def nearest_rank_from_counts(counts: Counter[int], quantile: float) -> int:
 
 
 def split_cutoffs(input_csvs: Iterable[Path], day: DaySpec, chunksize: int, usecols: list[str]) -> dict[str, object]:
-    """Compute Day-1 decision-time cutoffs and tail diagnostics after filtering."""
+    """Validate frozen Day-1 cutoffs and compute input tail diagnostics."""
     if not day.is_day1:
-        return {"train_end_ms": None, "val_end_ms": None}
+        return {
+            "policy": day.split_policy,
+            "train_end_ms": None,
+            "val_end_ms": None,
+        }
     minimum: int | None = None
     maximum: int | None = None
     decision_time_counts: Counter[int] = Counter()
@@ -231,21 +257,20 @@ def split_cutoffs(input_csvs: Iterable[Path], day: DaySpec, chunksize: int, usec
                 for value, count in values.value_counts(sort=False).items()
             })
     if minimum is None or maximum is None or maximum <= minimum:
-        raise ValueError(f"Could not derive valid Day-1 decision-time bounds for {day.source_file}.")
-    duration = maximum - minimum
-    raw_train_end = minimum + int(duration * float(day.train_ratio))
-    raw_val_end = minimum + int(duration * float(day.train_ratio + day.validation_ratio))
-    train_end = ((raw_train_end + WINDOW_MS - 1) // WINDOW_MS) * WINDOW_MS
-    val_end = ((raw_val_end + WINDOW_MS - 1) // WINDOW_MS) * WINDOW_MS
+        raise ValueError(f"Could not find valid Day-1 decision-time bounds for {day.source_file}.")
+    train_end = int(day.train_end_ms)
+    val_end = int(day.val_end_ms)
+    if train_end % WINDOW_MS or val_end % WINDOW_MS:
+        raise AssertionError("Frozen Day-1 split cutoffs must align to graph-window boundaries.")
     if not minimum < train_end < val_end <= maximum + WINDOW_MS:
-        raise AssertionError("Window-aligned Day-1 split cutoffs are invalid.")
+        raise AssertionError("Frozen Day-1 split cutoffs do not lie within the filtered input span.")
     percentile_0_1 = nearest_rank_from_counts(decision_time_counts, 0.001)
     percentile_99_9 = nearest_rank_from_counts(decision_time_counts, 0.999)
     return {
+        "policy": day.split_policy,
+        "cutoff_basis": DAY1_SPLIT_CUTOFF_BASIS,
         "train_end_ms": train_end,
         "val_end_ms": val_end,
-        "raw_train_end_ms": raw_train_end,
-        "raw_val_end_ms": raw_val_end,
         "decision_time_distribution": {
             "rows": sum(decision_time_counts.values()),
             "minimum_ms": minimum,

@@ -153,14 +153,20 @@ requires a separate streaming or replay study.
 ### 3.2 Splits and scaling
 
 - Define train, validation, and Test1 using `decision_time`, not `flow_start`.
-- Derive provisional chronological cutoffs from the Day-1 decision-time span,
-  then round each cutoff upward to the next 30-second window boundary. With
-  the convention `decision_time < cutoff`, this preserves the intended split
-  membership while making every split boundary a graph boundary.
+- Use the frozen episode-aware Day-1 split policy `day1_episode_aware_v1`:
+  `train` ends at `2018-02-28 15:44:00 UTC` (`1519832640000` ms) and
+  validation ends/Test1 begins at `2018-02-28 16:56:00 UTC`
+  (`1519836960000` ms). With `decision_time < cutoff`, both cutoffs are exact
+  30-second graph boundaries.
+- These cutoffs were fixed before model training at the midpoints of
+  corrected-positive-free gaps separating three Day-1 activity episodes. No
+  corrected-positive episode is divided between splits: the frozen input has
+  27,096 positive flows in train, 9,604 in validation, and 27,326 in Test1.
+  This is a label-informed dataset-design decision and must be disclosed; it
+  must not be retuned from model performance or recomputed for another dataset.
 - Record the Day-1 minimum, nearest-rank 0.1 and 99.9 percentiles, maximum, and
   the distance from each percentile to its corresponding extreme. These are
-  diagnostics, not inputs to the split calculation: an unusually large upper
-  tail must be investigated before accepting max-span-derived cutoffs.
+  input diagnostics, not inputs to the frozen split calculation.
 - Fit `StandardScaler` only with flows available in train.
 - Apply the frozen scaler to validation, Test1, and Test2.
 - A flow ending after the train/validation cutoff belongs to the split determined

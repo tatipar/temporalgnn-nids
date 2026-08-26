@@ -12,9 +12,10 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from utils.graph_construction import (
+    DAY1, DAY1_EPISODE_SPLIT_POLICY, DAY1_TRAIN_END_MS, DAY1_VAL_END_MS,
     IpIdMap, atomic_torch_save, audit_graph_file, build_graph,
     encode_edge_attributes, endpoint_invalid_reason, feature_preflight_audit,
-    nearest_rank_from_counts, prepare_chunk,
+    nearest_rank_from_counts, prepare_chunk, split_cutoffs, split_for_time,
 )
 from utils.graph_schema import (
     NFV3_EXTENDED, PORTABLE_CORE, destination_port_one_hot, protocol_one_hot,
@@ -73,6 +74,46 @@ class GraphSchemaTests(unittest.TestCase):
 
 
 class TemporalContractTests(unittest.TestCase):
+    def test_episode_split_boundaries_are_half_open(self) -> None:
+        cutoffs = {
+            "train_end_ms": DAY1_TRAIN_END_MS,
+            "val_end_ms": DAY1_VAL_END_MS,
+        }
+
+        self.assertEqual(split_for_time(DAY1, DAY1_TRAIN_END_MS - 1, cutoffs), "train")
+        self.assertEqual(split_for_time(DAY1, DAY1_TRAIN_END_MS, cutoffs), "val")
+        self.assertEqual(split_for_time(DAY1, DAY1_VAL_END_MS - 1, cutoffs), "val")
+        self.assertEqual(split_for_time(DAY1, DAY1_VAL_END_MS, cutoffs), "test1")
+
+    def test_split_cutoffs_use_frozen_episode_policy(self) -> None:
+        decision_times = [
+            DAY1_TRAIN_END_MS - 30_000,
+            DAY1_TRAIN_END_MS,
+            DAY1_VAL_END_MS,
+            DAY1_VAL_END_MS + 30_000,
+        ]
+        frame = pd.DataFrame({
+            "source_file": [DAY1.source_file] * len(decision_times),
+            "FLOW_START_MILLISECONDS": [value - 2 for value in decision_times],
+            "FLOW_END_MILLISECONDS": [value - 1 for value in decision_times],
+            "FLOW_DURATION_MILLISECONDS": [1] * len(decision_times),
+            "IPV4_SRC_ADDR": ["192.0.2.1"] * len(decision_times),
+            "IPV4_DST_ADDR": ["192.0.2.2"] * len(decision_times),
+        })
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "day1.csv"
+            frame.to_csv(path, index=False)
+            cutoffs = split_cutoffs(
+                [path], DAY1, chunksize=2, usecols=list(frame.columns),
+            )
+
+        self.assertEqual(cutoffs["policy"], DAY1_EPISODE_SPLIT_POLICY)
+        self.assertEqual(cutoffs["train_end_ms"], DAY1_TRAIN_END_MS)
+        self.assertEqual(cutoffs["val_end_ms"], DAY1_VAL_END_MS)
+        self.assertNotIn("raw_train_end_ms", cutoffs)
+        self.assertNotIn("raw_val_end_ms", cutoffs)
+
     def test_cutoff_tail_quantiles_expose_an_isolated_maximum(self) -> None:
         counts = Counter({100: 1, 200: 998, 10_000: 1})
         self.assertEqual(nearest_rank_from_counts(counts, 0.001), 100)

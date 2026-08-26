@@ -58,8 +58,20 @@ def parse_args() -> argparse.Namespace:
 
 def make_days(args: argparse.Namespace) -> tuple[DaySpec, DaySpec]:
     return (
-        DaySpec(DAY1.name, args.day1_source_file, DAY1.split_names, DAY1.train_ratio, DAY1.validation_ratio),
-        DaySpec(DAY2.name, args.day2_source_file, DAY2.split_names),
+        DaySpec(
+            name=DAY1.name,
+            source_file=args.day1_source_file,
+            split_names=DAY1.split_names,
+            split_policy=DAY1.split_policy,
+            train_end_ms=DAY1.train_end_ms,
+            val_end_ms=DAY1.val_end_ms,
+        ),
+        DaySpec(
+            name=DAY2.name,
+            source_file=args.day2_source_file,
+            split_names=DAY2.split_names,
+            split_policy=DAY2.split_policy,
+        ),
     )
 
 
