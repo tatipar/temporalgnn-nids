@@ -65,6 +65,7 @@ class DaySpec:
     split_policy: str = "single_full_day_holdout_v1"
     train_end_ms: int | None = None
     val_end_ms: int | None = None
+    require_binary_class_coverage: bool = False
 
     @property
     def is_day1(self) -> bool:
@@ -78,11 +79,13 @@ DAY1 = DaySpec(
     split_policy=DAY1_EPISODE_SPLIT_POLICY,
     train_end_ms=DAY1_TRAIN_END_MS,
     val_end_ms=DAY1_VAL_END_MS,
+    require_binary_class_coverage=True,
 )
 DAY2 = DaySpec(
     name="day2",
     source_file="cicids2018v3_thu0103.csv",
     split_names=("test2",),
+    require_binary_class_coverage=True,
 )
 
 
@@ -714,8 +717,14 @@ def audit_graph_file(
         provenance["binary_target"].to_numpy(dtype=np.int8),
     ):
         raise AssertionError(f"Graph targets disagree with provenance in {provenance_path}.")
+    positive_edges = int(data.y.sum().item())
     return (
-        {"graphs": 1, "edges": edges, "positive_edges": int(data.y.sum().item())},
+        {
+            "graphs": 1,
+            "edges": edges,
+            "negative_edges": edges - positive_edges,
+            "positive_edges": positive_edges,
+        },
         flow_ids,
         {"sha256": hashlib.sha256(serialized).hexdigest(), "bytes": len(serialized)},
     )

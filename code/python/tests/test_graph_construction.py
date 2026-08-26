@@ -254,7 +254,12 @@ class TemporalContractTests(unittest.TestCase):
                 graph_path, PORTABLE_CORE, mapping, provenance_path, "train",
             )
 
-        self.assertEqual(counts, {"graphs": 1, "edges": 1, "positive_edges": 1})
+        self.assertEqual(counts, {
+            "graphs": 1,
+            "edges": 1,
+            "negative_edges": 0,
+            "positive_edges": 1,
+        })
         self.assertEqual(flow_ids, ["day.csv:7"])
         self.assertEqual(len(artifact["sha256"]), 64)
         self.assertGreater(artifact["bytes"], 0)

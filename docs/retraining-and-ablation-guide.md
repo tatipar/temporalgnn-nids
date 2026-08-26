@@ -357,6 +357,9 @@ Implement these both as unit tests and as a graph-builder audit:
 - no label, IP, timestamp, flow ID, or metadata column is used as input;
 - total-flow and positive-flow counts are conserved from corrected CSV through
   graph splits, including documented endpoint exclusions.
+- every complete production split (`train`, validation, Test1, and Test2)
+  contains at least one positive and one negative edge; a single-class split
+  fails the final audit instead of publishing a misleading evaluation set.
 
 The production preflight records total, retained, and excluded row/positive
 counts globally and per source file. The final graph audit must match retained

@@ -65,12 +65,14 @@ def make_days(args: argparse.Namespace) -> tuple[DaySpec, DaySpec]:
             split_policy=DAY1.split_policy,
             train_end_ms=DAY1.train_end_ms,
             val_end_ms=DAY1.val_end_ms,
+            require_binary_class_coverage=DAY1.require_binary_class_coverage,
         ),
         DaySpec(
             name=DAY2.name,
             source_file=args.day2_source_file,
             split_names=DAY2.split_names,
             split_policy=DAY2.split_policy,
+            require_binary_class_coverage=DAY2.require_binary_class_coverage,
         ),
     )
 
@@ -214,6 +216,40 @@ def build_artifact_summary(root: Path, profiles, days, checksums_path: Path, che
     }
 
 
+def summarize_split_class_coverage(
+    counts: Counter,
+    *,
+    required: bool,
+    partial: bool,
+    split_label: str,
+) -> dict[str, int | str]:
+    """Report split class counts and reject single-class production splits."""
+    edges = int(counts["edges"])
+    positive_edges = int(counts["positive_edges"])
+    negative_edges = int(counts["negative_edges"])
+    if positive_edges + negative_edges != edges:
+        raise AssertionError(f"Binary class accounting failed for {split_label}.")
+    has_both_classes = positive_edges > 0 and negative_edges > 0
+    if required and not partial and not has_both_classes:
+        raise AssertionError(
+            f"Full build split {split_label} must contain both binary classes: "
+            f"negative_edges={negative_edges}, positive_edges={positive_edges}."
+        )
+    if partial:
+        coverage_status = "partial"
+    elif has_both_classes:
+        coverage_status = "passed"
+    else:
+        coverage_status = "not_required"
+    return {
+        "graphs": int(counts["graphs"]),
+        "edges": edges,
+        "negative_edges": negative_edges,
+        "positive_edges": positive_edges,
+        "class_coverage_status": coverage_status,
+    }
+
+
 def audit_output(
     root: Path,
     profiles,
@@ -265,6 +301,10 @@ def audit_output(
                 for profile in profiles
             }
             if not any(graph_dirs[profile.name].exists() for profile in profiles):
+                if day.require_binary_class_coverage and not partial:
+                    raise AssertionError(
+                        f"Full build is missing required split {day.name}/{split}."
+                    )
                 continue
 
             reference_names = [path.name for path in files_by_profile[profiles[0].name]]
@@ -311,7 +351,12 @@ def audit_output(
                     split_totals[profile.name].update(audit)
 
             for profile in profiles:
-                result["profiles"][profile.name]["splits"][split] = dict(split_totals[profile.name])
+                result["profiles"][profile.name]["splits"][split] = summarize_split_class_coverage(
+                    split_totals[profile.name],
+                    required=day.require_binary_class_coverage,
+                    partial=partial,
+                    split_label=f"{profile.name}/{day.name}/{split}",
+                )
                 day_totals[profile.name].update(split_totals[profile.name])
 
         expected = preflight["by_source_file"][day.source_file]
@@ -403,6 +448,15 @@ def main() -> None:
         "window_policy": "flow_end_in_half_open_window; decision_time_is_window_close",
         "flow_end_column": END_TIME_COLUMN,
         "day1_cutoffs": day1_cutoffs,
+        "split_contract": {
+            day.name: {
+                "policy": day.split_policy,
+                "source_file": day.source_file,
+                "split_names": list(day.split_names),
+                "require_binary_class_coverage": day.require_binary_class_coverage,
+            }
+            for day in days
+        },
         "checkpoint_every_windows": args.checkpoint_every,
     }
     atomic_json_dump(build_metadata, root / "build_configuration.json")

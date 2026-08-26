@@ -14,7 +14,7 @@ from sklearn.preprocessing import StandardScaler
 from scripts.build_nfv3_graphs import (
     audit_output, build_artifact_summary, collection_checksum_summary,
     iter_complete_windows, register_window_endpoints, save_day_checkpoint,
-    save_profile_artifacts,
+    save_profile_artifacts, summarize_split_class_coverage,
 )
 from utils.graph_construction import (
     DAY1, DaySpec, IpIdMap, atomic_json_dump, atomic_torch_save, build_graph,
@@ -171,6 +171,23 @@ class ResumeMappingTests(unittest.TestCase):
 
 
 class OutputAuditTests(unittest.TestCase):
+    def test_full_audit_requires_both_binary_classes(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "must contain both binary classes"):
+            summarize_split_class_coverage(
+                {"graphs": 2, "edges": 5, "negative_edges": 5, "positive_edges": 0},
+                required=True,
+                partial=False,
+                split_label="portable_core/day1/test1",
+            )
+
+        partial = summarize_split_class_coverage(
+            {"graphs": 2, "edges": 5, "negative_edges": 5, "positive_edges": 0},
+            required=True,
+            partial=True,
+            split_label="portable_core/day1/test1",
+        )
+        self.assertEqual(partial["class_coverage_status"], "partial")
+
     def test_collection_digest_is_order_independent_and_path_sensitive(self) -> None:
         first = {
             "b.pt": {"sha256": "b" * 64, "bytes": 20},
