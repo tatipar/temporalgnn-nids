@@ -40,12 +40,14 @@ The current base policies are:
 | Model | `temporal` | `temporal_memory_policy` |
 |---|---:|---|
 | `SimpleMLP` | `false` | `none` |
-| `EdgeGRU_Baseline_NoX` | `true` | `reset_each_split_carry_across_nonempty_windows_no_decay` |
+| `EdgeGRU_Baseline_NoX` | `true` | `reset_each_sequence_carry_across_nonempty_windows_no_decay` |
 | `StaticGNN_Identity` | `false` | `none` |
-| `ST_GNN_Identity` | `true` | `reset_each_split_carry_across_nonempty_windows_no_decay` |
+| `ST_GNN_Identity` | `true` | `reset_each_sequence_carry_across_nonempty_windows_no_decay` |
 | `E_GraphSAGE` | `false` | `none` |
 
-Temporal models must implement `reset_memory()` and `detach_all_memory()`.
+Here, a sequence is one complete chronological pass through a split: one
+training epoch or one validation/test evaluation. Temporal models must
+implement `reset_memory()` and `detach_all_memory()`.
 Training and evaluation fail immediately if the configuration and model
 capability disagree. The elapsed-time decay and lagged-identity changes remain
 separate later-phase model variants; the policy above records the exact Phase-2
