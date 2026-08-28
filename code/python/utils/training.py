@@ -16,6 +16,17 @@ from .metrics import calculate_metrics_gnn
 from .visualization import save_plots
 
 
+def forward_graph(model, data):
+    """Run a model through the shared no-node-feature graph interface."""
+    return model(
+        edge_index=data.edge_index,
+        edge_attr=data.edge_attr,
+        num_nodes=data.num_nodes,
+        global_node_ids=getattr(data, "global_node_ids", None),
+        timestamp=getattr(data, "timestamp", None),
+    )
+
+
 def train_epoch(model, loader, optimizer, criterion, device,
                 is_temporal=False, batch_steps=10):
     """
@@ -23,7 +34,8 @@ def train_epoch(model, loader, optimizer, criterion, device,
 
     Accumulates loss over `batch_steps` valid graph windows before calling
     optimizer.step(), then detaches temporal memory to cut the gradient graph.
-    Supports all model variants via use_node_stats and is_temporal flags.
+    Models consume the shared graph contract directly; persisted node features
+    are neither expected nor synthesized by the training loop.
 
     Parameters
     ----------
@@ -43,29 +55,16 @@ def train_epoch(model, loader, optimizer, criterion, device,
     if is_temporal and hasattr(model, 'reset_memory'):
         model.reset_memory()
 
-    use_stats = getattr(model, 'use_node_stats', False)
     total_loss = 0
     steps = 0
     batch_loss = 0
 
     for batch_idx, data in enumerate(loader):
         data = data.to(device)
-        if data.x.shape[0] == 0:
+        if data.edge_attr.shape[0] == 0:
             continue
 
-        if is_temporal:
-            if use_stats:
-                out = model(data.x, data.edge_index, data.edge_attr,
-                            data.global_node_ids, data.node_stats)
-            else:
-                out = model(data.x, data.edge_index, data.edge_attr,
-                            data.global_node_ids)
-        else:
-            if use_stats:
-                out = model(data.x, data.edge_index, data.edge_attr,
-                            data.node_stats)
-            else:
-                out = model(data.x, data.edge_index, data.edge_attr)
+        out = forward_graph(model, data)
 
         batch_loss += criterion(out.view(-1), data.y)
         steps += 1
@@ -111,7 +110,6 @@ def evaluate(model, loader, criterion, device, is_temporal=False):
     if is_temporal and hasattr(model, 'reset_memory'):
         model.reset_memory()
 
-    use_stats = getattr(model, 'use_node_stats', False)
     all_probs = []
     all_trues = []
     total_loss = 0
@@ -119,22 +117,10 @@ def evaluate(model, loader, criterion, device, is_temporal=False):
 
     for data in loader:
         data = data.to(device)
-        if data.x.shape[0] == 0:
+        if data.edge_attr.shape[0] == 0:
             continue
 
-        if is_temporal:
-            if use_stats:
-                out = model(data.x, data.edge_index, data.edge_attr,
-                            data.global_node_ids, data.node_stats)
-            else:
-                out = model(data.x, data.edge_index, data.edge_attr,
-                            data.global_node_ids)
-        else:
-            if use_stats:
-                out = model(data.x, data.edge_index, data.edge_attr,
-                            data.node_stats)
-            else:
-                out = model(data.x, data.edge_index, data.edge_attr)
+        out = forward_graph(model, data)
 
         total_loss += criterion(out.view(-1), data.y).item()
         all_probs.extend(torch.sigmoid(out.view(-1)).cpu().numpy())
@@ -172,28 +158,15 @@ def find_optimal_threshold(model, loader, device,
     if is_temporal and hasattr(model, 'reset_memory'):
         model.reset_memory()
 
-    use_stats = getattr(model, 'use_node_stats', False)
     all_probs, all_trues = [], []
 
     with torch.no_grad():
         for data in loader:
             data = data.to(device)
-            if data.x.shape[0] == 0:
+            if data.edge_attr.shape[0] == 0:
                 continue
 
-            if is_temporal:
-                if use_stats:
-                    out = model(data.x, data.edge_index, data.edge_attr,
-                                data.global_node_ids, data.node_stats)
-                else:
-                    out = model(data.x, data.edge_index, data.edge_attr,
-                                data.global_node_ids)
-            else:
-                if use_stats:
-                    out = model(data.x, data.edge_index, data.edge_attr,
-                                data.node_stats)
-                else:
-                    out = model(data.x, data.edge_index, data.edge_attr)
+            out = forward_graph(model, data)
 
             all_probs.extend(torch.sigmoid(out.view(-1)).cpu().numpy())
             all_trues.extend(data.y.cpu().numpy())

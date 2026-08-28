@@ -13,10 +13,11 @@ class SimpleMLP(nn.Module):
     """
     Feed-forward baseline: classifies edges using only their flow attributes
     (edge_attr). Does not use graph structure.
-    node_dim is accepted for API compatibility with train_epoch but ignored.
+    It follows the shared graph-model interface but ignores graph topology,
+    node count, global node IDs, and timestamps.
     """
 
-    def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None):
+    def __init__(self, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None, node_dim=None):
         super().__init__()
         self.input_dim = edge_dim
 
@@ -37,7 +38,8 @@ class SimpleMLP(nn.Module):
         if output_bias_init is not None:
             self.net[-1].bias.data.fill_(output_bias_init)
 
-    def forward(self, x, edge_index, edge_attr):
+    def forward(self, edge_index, edge_attr, num_nodes,
+                global_node_ids=None, timestamp=None):
         return self.net(edge_attr)
 
 
@@ -230,8 +232,9 @@ class EdgeGRU_Baseline_NoX(nn.Module):
     This is the clean "time-only" ablation: temporal memory without any
     graph-convolution or node-feature signal.
 
-    Forward: (x, edge_index, edge_attr, global_node_ids)
-    x is accepted for interface compatibility but not used in computation.
+    No persisted node-feature tensor is required. ``num_nodes`` defines the
+    graph-local state shape and ``global_node_ids`` provides stable temporal
+    memory keys.
     """
 
     def __init__(self, edge_dim, hidden_dim, dropout, output_bias_init=None, node_dim=None):
@@ -277,9 +280,14 @@ class EdgeGRU_Baseline_NoX(nn.Module):
     def reset_memory(self):
         self.node_memory = {}
 
-    def forward(self, x, edge_index, edge_attr, global_node_ids):
-        device = x.device
-        num_nodes_batch = x.size(0)
+    def forward(self, edge_index, edge_attr, num_nodes,
+                global_node_ids=None, timestamp=None):
+        if global_node_ids is None:
+            raise ValueError("EdgeGRU_Baseline_NoX requires global_node_ids.")
+        device = edge_attr.device
+        num_nodes_batch = int(num_nodes)
+        if global_node_ids.numel() != num_nodes_batch:
+            raise ValueError("global_node_ids must contain one ID per local node.")
 
         src, dst = edge_index
 
@@ -345,11 +353,13 @@ class E_GraphSAGE(nn.Module):
     that are diluted during aggregation. hidden_dim=32 for equal-capacity
     comparison.
 
-    Forward: (x, edge_index, edge_attr) — non-temporal, no global_node_ids.
+    The graph artifacts have no node features. This implementation constructs
+    its documented all-ones constant initial node state internally.
     """
 
     def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None):
         super().__init__()
+        self.node_dim = node_dim
         self.dropout_rate = dropout
 
         self.sage1 = _ESAGEConv(node_dim,    hidden_dim, edge_dim)
@@ -367,9 +377,13 @@ class E_GraphSAGE(nn.Module):
         if output_bias_init is not None:
             self.classifier[-1].bias.data.fill_(output_bias_init)
 
-    def forward(self, x, edge_index, edge_attr):
-        if x.size(0) == 0:
-            return torch.empty((0, 1), device=x.device)
+    def forward(self, edge_index, edge_attr, num_nodes,
+                global_node_ids=None, timestamp=None):
+        num_nodes = int(num_nodes)
+        if num_nodes == 0:
+            return torch.empty((0, 1), device=edge_attr.device)
+
+        x = edge_attr.new_ones((num_nodes, self.node_dim))
 
         h = F.dropout(self.sage1(x, edge_index, edge_attr),
                       p=self.dropout_rate, training=self.training)
@@ -436,13 +450,15 @@ class StaticGNN_Identity(nn.Module):
         count[count < 1] = 1
         return out / count
 
-    def forward(self, x, edge_index, edge_attr):
-        if x.size(0) == 0: return torch.empty((0, 1), device=x.device)
+    def forward(self, edge_index, edge_attr, num_nodes,
+                global_node_ids=None, timestamp=None):
+        num_nodes = int(num_nodes)
+        if num_nodes == 0:
+            return torch.empty((0, 1), device=edge_attr.device)
 
         # STEP 1: Build node identity from edge aggregation
         edge_embeddings = F.relu(self.edge_proj(edge_attr))
         src, dst = edge_index
-        num_nodes = x.size(0)
         x_out = self.manual_scatter_mean(edge_embeddings, src, dim_size=num_nodes)
         x_in  = self.manual_scatter_mean(edge_embeddings, dst, dim_size=num_nodes)
         x_input = torch.cat([x_out, x_in], dim=1)
@@ -747,19 +763,25 @@ class ST_GNN_Identity(nn.Module):
     def reset_memory(self):
         self.node_memory = {}
 
-    def forward(self, x, edge_index, edge_attr, global_ids):
-        if x.size(0) == 0: return torch.empty((0, 1), device=x.device)
+    def forward(self, edge_index, edge_attr, num_nodes,
+                global_node_ids=None, timestamp=None):
+        num_nodes = int(num_nodes)
+        if num_nodes == 0:
+            return torch.empty((0, 1), device=edge_attr.device)
+        if global_node_ids is None:
+            raise ValueError("ST_GNN_Identity requires global_node_ids.")
+        if global_node_ids.numel() != num_nodes:
+            raise ValueError("global_node_ids must contain one ID per local node.")
 
         # STEP 1: Build node identity from edge aggregation
         edge_embeddings = F.relu(self.edge_proj(edge_attr))
         src, dst = edge_index
-        num_nodes = x.size(0)
         x_out = self.manual_scatter_mean(edge_embeddings, src, dim_size=num_nodes)
         x_in  = self.manual_scatter_mean(edge_embeddings, dst, dim_size=num_nodes)
         x_input = torch.cat([x_out, x_in], dim=1)
 
         # STEP 2: GNN layers + GRU memory
-        h_prev = self.get_memory(global_ids, x.device)
+        h_prev = self.get_memory(global_node_ids, edge_attr.device)
 
         z = self.gnn1(x_input, edge_index, edge_attr=edge_attr)
         z = F.dropout(F.elu(self.norm1(z)), p=self.dropout_rate, training=self.training)
@@ -768,10 +790,9 @@ class ST_GNN_Identity(nn.Module):
         z = F.elu(self.norm2(z))
 
         h_current = self.gru(z, h_prev)
-        self.update_memory(global_ids, h_current)
+        self.update_memory(global_node_ids, h_current)
 
         # STEP 3: Edge classification
         edge_rep = torch.cat([h_current[src], h_current[dst], edge_attr], dim=1)
         return self.classifier(edge_rep)
-
 
