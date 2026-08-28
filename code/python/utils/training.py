@@ -1,9 +1,19 @@
+"""Shared training, validation, and threshold-selection utilities."""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
 import gc
 import json
+import math
 import os
 import random
+import re
+import subprocess
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -14,6 +24,22 @@ from sklearn.metrics import average_precision_score, precision_recall_curve
 from .experiment import EarlyStopping, NumpyEncoder
 from .metrics import calculate_metrics_gnn
 from .visualization import save_plots
+
+
+SELECTION_METRIC = "average_precision"
+THRESHOLD_STRATEGIES = frozenset({"max_f1", "constrained"})
+
+
+@dataclass(frozen=True)
+class TrainingEpochResult:
+    """Flow-level optimization diagnostics for one epoch."""
+
+    loss_per_flow: float
+    flows: int
+    graph_windows: int
+    optimizer_steps: int
+    gradient_norm_mean: float | None
+    gradient_norm_max: float | None
 
 
 def forward_graph(model, data):
@@ -27,401 +53,662 @@ def forward_graph(model, data):
     )
 
 
-def train_epoch(model, loader, optimizer, criterion, device,
-                is_temporal=False, batch_steps=10):
+def validate_temporal_configuration(model, temporal: bool) -> None:
+    """Fail when an explicit run configuration disagrees with the model."""
+    if not isinstance(temporal, bool):
+        raise TypeError("temporal must be declared explicitly as a boolean.")
+    declared = getattr(model, "temporal", None)
+    if not isinstance(declared, bool):
+        raise ValueError(
+            f"Model {type(model).__name__} does not declare a boolean temporal capability."
+        )
+    if declared != temporal:
+        raise ValueError(
+            f"Temporal configuration mismatch for {type(model).__name__}: "
+            f"config={temporal}, model={declared}."
+        )
+    if temporal:
+        missing = [
+            method for method in ("reset_memory", "detach_all_memory")
+            if not callable(getattr(model, method, None))
+        ]
+        if missing:
+            raise ValueError(
+                f"Temporal model {type(model).__name__} lacks required memory methods: {missing}."
+            )
+
+
+def make_flow_criterion(pos_weight: float, device: str | torch.device):
+    """Create the only loss reduction accepted by the flow-level protocol."""
+    if not math.isfinite(pos_weight) or pos_weight <= 0:
+        raise ValueError("pos_weight must be a positive finite number.")
+    weight = torch.tensor([pos_weight], dtype=torch.float32, device=device)
+    return nn.BCEWithLogitsLoss(pos_weight=weight, reduction="sum")
+
+
+def _validate_flow_criterion(criterion) -> None:
+    if not isinstance(criterion, nn.BCEWithLogitsLoss):
+        raise TypeError("Flow training requires torch.nn.BCEWithLogitsLoss.")
+    if criterion.reduction != "sum":
+        raise ValueError("Flow training requires BCEWithLogitsLoss(reduction='sum').")
+
+
+def _gradient_norm(parameters) -> torch.Tensor:
+    norms = [parameter.grad.detach().norm(2) for parameter in parameters if parameter.grad is not None]
+    if not norms:
+        return torch.tensor(0.0)
+    return torch.stack(norms).norm(2)
+
+
+def train_epoch(
+    model,
+    loader,
+    optimizer,
+    criterion,
+    device,
+    *,
+    temporal: bool,
+    batch_steps: int = 10,
+    max_grad_norm: float | None = None,
+) -> TrainingEpochResult:
+    """Train one epoch with TBPTT blocks weighted by their flow counts.
+
+    Each graph contributes the sum of its per-flow losses. Before backward, the
+    accumulated block loss is divided by the total number of flows in that
+    block. Consequently, a 5,000-flow graph has the same per-flow influence as
+    5,000 one-flow observations rather than the influence of one graph window.
     """
-    Train one epoch using Truncated Backpropagation Through Time (TBPTT).
+    _validate_flow_criterion(criterion)
+    validate_temporal_configuration(model, temporal)
+    if batch_steps <= 0:
+        raise ValueError("batch_steps must be positive.")
+    if max_grad_norm is not None and (
+        not math.isfinite(max_grad_norm) or max_grad_norm <= 0
+    ):
+        raise ValueError("max_grad_norm must be a positive finite number or None.")
 
-    Accumulates loss over `batch_steps` valid graph windows before calling
-    optimizer.step(), then detaches temporal memory to cut the gradient graph.
-    Models consume the shared graph contract directly; persisted node features
-    are neither expected nor synthesized by the training loop.
-
-    Parameters
-    ----------
-    model       : GNN or baseline model
-    loader      : DataLoader over graph windows (sequential order)
-    optimizer   : torch optimizer
-    criterion   : loss function (BCEWithLogitsLoss)
-    device      : torch.device
-    is_temporal : bool — True for ST-GNN and EdgeGRU models
-    batch_steps : int  — number of valid windows per TBPTT step
-
-    Returns
-    -------
-    float — average loss per valid window
-    """
     model.train()
-    if is_temporal and hasattr(model, 'reset_memory'):
+    if temporal:
         model.reset_memory()
 
-    total_loss = 0
-    steps = 0
-    batch_loss = 0
+    total_loss_sum = 0.0
+    total_flows = 0
+    graph_windows = 0
+    optimizer_steps = 0
+    gradient_norms: list[float] = []
+    block_loss_sum = None
+    block_flows = 0
+    block_windows = 0
 
-    for batch_idx, data in enumerate(loader):
-        data = data.to(device)
-        if data.edge_attr.shape[0] == 0:
-            continue
-
-        out = forward_graph(model, data)
-
-        batch_loss += criterion(out.view(-1), data.y)
-        steps += 1
-
-        is_last_batch = (batch_idx == len(loader) - 1)
-        if (steps > 0 and steps % batch_steps == 0) or is_last_batch:
-            if batch_loss > 0:
-                optimizer.zero_grad()
-                batch_loss.backward()
-                optimizer.step()
-
-                total_loss += batch_loss.item()
-                batch_loss = 0
-
-                if is_temporal:
-                    model.detach_all_memory()
-
-    return total_loss / steps if steps > 0 else 0.0
-
-
-@torch.no_grad()
-def evaluate(model, loader, criterion, device, is_temporal=False):
-    """
-    Run inference over a DataLoader and return loss + raw probabilities.
-
-    Applies sigmoid to convert logits to probabilities. Callers are
-    responsible for applying a threshold and computing metrics via
-    calculate_metrics_gnn().
-
-    Parameters
-    ----------
-    model       : GNN or baseline model
-    loader      : DataLoader
-    criterion   : loss function (BCEWithLogitsLoss)
-    device      : torch.device
-    is_temporal : bool
-
-    Returns
-    -------
-    (avg_loss, y_true, y_probs) — all numpy arrays
-    """
-    model.eval()
-    if is_temporal and hasattr(model, 'reset_memory'):
-        model.reset_memory()
-
-    all_probs = []
-    all_trues = []
-    total_loss = 0
-    steps = 0
+    def optimize_block() -> None:
+        nonlocal block_loss_sum, block_flows, block_windows, optimizer_steps
+        if block_loss_sum is None or block_flows == 0:
+            return
+        optimizer.zero_grad()
+        (block_loss_sum / block_flows).backward()
+        if max_grad_norm is None:
+            norm = _gradient_norm(model.parameters())
+        else:
+            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        gradient_norms.append(float(norm.detach().cpu()))
+        optimizer.step()
+        optimizer_steps += 1
+        if temporal:
+            model.detach_all_memory()
+        block_loss_sum = None
+        block_flows = 0
+        block_windows = 0
 
     for data in loader:
         data = data.to(device)
-        if data.edge_attr.shape[0] == 0:
+        flow_count = int(data.edge_attr.shape[0])
+        if flow_count == 0:
             continue
+        logits = forward_graph(model, data).view(-1)
+        targets = data.y.view(-1)
+        if logits.numel() != flow_count or targets.numel() != flow_count:
+            raise ValueError("Model logits and targets must contain one value per flow.")
 
-        out = forward_graph(model, data)
+        graph_loss_sum = criterion(logits, targets)
+        block_loss_sum = graph_loss_sum if block_loss_sum is None else block_loss_sum + graph_loss_sum
+        block_flows += flow_count
+        block_windows += 1
+        total_loss_sum += float(graph_loss_sum.detach().cpu())
+        total_flows += flow_count
+        graph_windows += 1
 
-        total_loss += criterion(out.view(-1), data.y).item()
-        all_probs.extend(torch.sigmoid(out.view(-1)).cpu().numpy())
-        all_trues.extend(data.y.cpu().numpy())
-        steps += 1
+        if block_windows == batch_steps:
+            optimize_block()
 
-    avg_loss = total_loss / steps if steps > 0 else 0.0
-    return avg_loss, np.array(all_trues), np.array(all_probs)
+    optimize_block()
+    mean_gradient_norm = float(np.mean(gradient_norms)) if gradient_norms else None
+    max_gradient_norm = float(np.max(gradient_norms)) if gradient_norms else None
+    return TrainingEpochResult(
+        loss_per_flow=total_loss_sum / total_flows if total_flows else 0.0,
+        flows=total_flows,
+        graph_windows=graph_windows,
+        optimizer_steps=optimizer_steps,
+        gradient_norm_mean=mean_gradient_norm,
+        gradient_norm_max=max_gradient_norm,
+    )
 
 
-def find_optimal_threshold(model, loader, device,
-                           is_temporal=False,
-                           strategy='max_f1',
-                           min_precision=0.90):
-    """
-    Find the optimal decision threshold on a validation set.
-
-    Parameters
-    ----------
-    model         : trained model
-    loader        : DataLoader (typically validation set)
-    device        : torch.device
-    is_temporal   : bool
-    strategy      : 'max_f1'        — maximise F1 (default, used for final evaluation)
-                    'constrained'   — maximise recall subject to precision >= min_precision,
-                                      fallback to max-F1 if constraint is not met
-    min_precision : float — precision floor for strategy='constrained' (default 0.90)
-
-    Returns
-    -------
-    (best_threshold, y_true, y_probs) — threshold as float, labels and
-    probabilities as numpy arrays (for downstream calibration plots)
-    """
+@torch.no_grad()
+def evaluate(model, loader, criterion, device, *, temporal: bool):
+    """Return validation loss per flow, binary targets, and probabilities."""
+    _validate_flow_criterion(criterion)
+    validate_temporal_configuration(model, temporal)
     model.eval()
-    if is_temporal and hasattr(model, 'reset_memory'):
+    if temporal:
         model.reset_memory()
 
-    all_probs, all_trues = [], []
+    all_probs = []
+    all_targets = []
+    total_loss_sum = 0.0
+    total_flows = 0
+    for data in loader:
+        data = data.to(device)
+        flow_count = int(data.edge_attr.shape[0])
+        if flow_count == 0:
+            continue
+        logits = forward_graph(model, data).view(-1)
+        targets = data.y.view(-1)
+        if logits.numel() != flow_count or targets.numel() != flow_count:
+            raise ValueError("Model logits and targets must contain one value per flow.")
+        total_loss_sum += float(criterion(logits, targets).detach().cpu())
+        total_flows += flow_count
+        all_probs.extend(torch.sigmoid(logits).cpu().numpy())
+        all_targets.extend(targets.cpu().numpy())
+    return (
+        total_loss_sum / total_flows if total_flows else 0.0,
+        np.asarray(all_targets),
+        np.asarray(all_probs),
+    )
 
+
+def select_optimal_threshold(
+    y_true,
+    y_probs,
+    *,
+    strategy: str,
+    min_precision: float | None = None,
+) -> tuple[float, str]:
+    """Select a threshold using validation predictions only."""
+    if strategy not in THRESHOLD_STRATEGIES:
+        choices = ", ".join(sorted(THRESHOLD_STRATEGIES))
+        raise ValueError(f"Unknown threshold strategy {strategy!r}. Expected: {choices}.")
+    if min_precision is not None:
+        try:
+            min_precision = float(min_precision)
+        except (TypeError, ValueError) as error:
+            raise ValueError("min_precision must be a number.") from error
+    if strategy == "max_f1" and min_precision is not None:
+        raise ValueError("min_precision must be omitted when strategy='max_f1'.")
+    if strategy == "constrained" and (
+        min_precision is None
+        or not math.isfinite(min_precision)
+        or not 0 <= min_precision <= 1
+    ):
+        raise ValueError(
+            "strategy='constrained' requires min_precision in the closed interval [0, 1]."
+        )
+
+    y_true = np.asarray(y_true)
+    y_probs = np.asarray(y_probs)
+    if y_true.size == 0 or y_probs.size != y_true.size:
+        raise ValueError("Threshold selection requires aligned non-empty targets and probabilities.")
+    if np.unique(y_true).size != 2:
+        raise ValueError("Threshold selection requires both binary classes in validation.")
+
+    precisions, recalls, thresholds = precision_recall_curve(y_true, y_probs)
+    precisions = precisions[:-1]
+    recalls = recalls[:-1]
+    if thresholds.size == 0:
+        raise ValueError("Validation predictions did not produce any candidate thresholds.")
+    f1_scores = 2 * precisions * recalls / (precisions + recalls + 1e-12)
+
+    if strategy == "constrained":
+        valid = np.flatnonzero(precisions >= min_precision)
+        if valid.size:
+            best_index = valid[np.argmax(recalls[valid])]
+            description = f"max_recall_at_precision_gte_{min_precision:g}"
+        else:
+            best_index = int(np.argmax(f1_scores))
+            description = "max_f1_fallback_constraint_not_met"
+    else:
+        best_index = int(np.argmax(f1_scores))
+        description = "max_f1"
+    return float(thresholds[best_index]), description
+
+
+def find_optimal_threshold(
+    model,
+    loader,
+    device,
+    *,
+    temporal: bool,
+    strategy: str,
+    min_precision: float | None = None,
+):
+    """Run validation inference and select an explicitly configured threshold."""
+    validate_temporal_configuration(model, temporal)
+    model.eval()
+    if temporal:
+        model.reset_memory()
+
+    all_probs, all_targets = [], []
     with torch.no_grad():
         for data in loader:
             data = data.to(device)
             if data.edge_attr.shape[0] == 0:
                 continue
-
-            out = forward_graph(model, data)
-
-            all_probs.extend(torch.sigmoid(out.view(-1)).cpu().numpy())
-            all_trues.extend(data.y.cpu().numpy())
-
-    y_true  = np.array(all_trues)
-    y_probs = np.array(all_probs)
-
-    precisions, recalls, thresholds = precision_recall_curve(y_true, y_probs)
-    precisions = precisions[:-1]
-    recalls    = recalls[:-1]
-    f1_scores  = 2 * (precisions * recalls) / (precisions + recalls + 1e-10)
-
-    if strategy == 'constrained':
-        valid = np.where(precisions >= min_precision)[0]
-        if len(valid) > 0:
-            best_idx     = valid[np.argmax(recalls[valid])]
-            strategy_msg = f"Max Recall @ Prec>={min_precision}"
-        else:
-            best_idx     = np.argmax(f1_scores)
-            strategy_msg = "Max F1 (Fallback — precision constraint not met)"
-    else:  # 'max_f1'
-        best_idx     = np.argmax(f1_scores)
-        strategy_msg = "Max F1"
-
-    best_th = thresholds[best_idx]
-    print(f"\nOptimal Threshold: {best_th:.4f} ({strategy_msg})")
-
-    return best_th, y_true, y_probs
+            logits = forward_graph(model, data).view(-1)
+            all_probs.extend(torch.sigmoid(logits).cpu().numpy())
+            all_targets.extend(data.y.view(-1).cpu().numpy())
+    y_true = np.asarray(all_targets)
+    y_probs = np.asarray(all_probs)
+    threshold, description = select_optimal_threshold(
+        y_true,
+        y_probs,
+        strategy=strategy,
+        min_precision=min_precision,
+    )
+    print(f"\nOptimal threshold: {threshold:.6f} ({description})")
+    return threshold, y_true, y_probs
 
 
-# Backwards-compatible alias
-find_optimal_threshold_constrained = lambda *a, **kw: find_optimal_threshold(
-    *a, strategy='constrained', **kw
-)
-
-
-def set_seed(seed):
-    """Set all random seeds for reproducibility."""
+def set_seed(seed: int) -> None:
+    """Set Python, NumPy, and PyTorch random seeds."""
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     np.random.seed(seed)
     random.seed(seed)
 
 
-def run_multiple_seeds(model_class, model_config, train_loader, val_loader,
-                       manager,
-                       seeds=[42, 123, 777, 2024, 99],
-                       epochs=60,
-                       device='cpu',
-                       experiment_name="Exp_Optimized",
-                       json_dir="./logs",
-                       plots_dir="./plots"):
-    """
-    Train a model across multiple random seeds and log results.
+def _git_code_version() -> str:
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+        dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip())
+        return f"{commit}-dirty" if dirty else commit
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
 
-    For each seed: instantiates a fresh model, runs training with early stopping,
-    finds the optimal threshold, computes metrics, saves plots and a JSON history,
-    and logs to the ExperimentManager. Prints a summary table at the end.
 
-    Parameters
-    ----------
-    model_class     : class — model constructor
-    model_config    : dict  — must contain 'model_params' and 'extra_params'
-                              (learning_rate, pos_weight, batch_steps)
-    train_loader    : DataLoader
-    val_loader      : DataLoader
-    manager         : ExperimentManager
-    seeds           : list of ints
-    epochs          : int — max training epochs per seed
-    device          : torch.device or str
-    experiment_name : str — used for file names and log filtering
-    json_dir        : str — directory for training history JSON files
-    plots_dir       : str — directory for plot files
-    """
-    os.makedirs(json_dir, exist_ok=True)
-    os.makedirs(plots_dir, exist_ok=True)
+def _dataset_metadata(loader) -> dict[str, Any]:
+    dataset = getattr(loader, "dataset", None)
+    required_attributes = (
+        "manifest", "manifest_path", "graph_root", "profile", "split",
+        "expected_schema_hash", "edge_dim", "window_ms",
+    )
+    missing = [name for name in required_attributes if not hasattr(dataset, name)]
+    if missing:
+        raise ValueError(f"Loader dataset lacks reproducibility metadata: {missing}.")
+    manifest = dataset.manifest
+    profile = dataset.profile
+    try:
+        corrected_manifest_artifact = manifest["corrected_manifest"]
+        corrected_manifest_path = corrected_manifest_artifact["path"]
+        if _file_sha256(corrected_manifest_path) != corrected_manifest_artifact["sha256"]:
+            raise ValueError("Corrected-data manifest hash does not match the graph manifest.")
+        with open(corrected_manifest_path, "r", encoding="utf-8") as handle:
+            corrected_manifest = json.load(handle)
+        metadata = {
+            "graph_root": str(dataset.graph_root),
+            "graph_manifest_sha256": _file_sha256(dataset.manifest_path),
+            "corrected_manifest_sha256": corrected_manifest_artifact["sha256"],
+            "corrected_data_sha256": corrected_manifest["output"]["sha256"],
+            "correction_rule_version": corrected_manifest["correction_rule_version"],
+            "feature_profile": profile,
+            "feature_schema_sha256": dataset.expected_schema_hash,
+            "edge_dim": int(dataset.edge_dim),
+            "window_ms": int(dataset.window_ms),
+            "graph_collection_sha256": manifest["artifacts"]["graph_collections"][profile]["sha256"],
+            "scaler_sha256": manifest["artifacts"]["scalers"][profile]["sha256"],
+            "mapping_sha256": {
+                name: artifact["sha256"]
+                for name, artifact in manifest["artifacts"]["mappings"].items()
+            },
+            "checksum_index_sha256": manifest["artifacts"]["checksum_index"]["sha256"],
+            "provenance_collection_sha256": manifest["artifacts"]["provenance_collection"]["sha256"],
+            "input_csv_sha256": {
+                artifact["path"]: artifact["sha256"]
+                for artifact in manifest["input_csvs"]
+            },
+            "split": dataset.split,
+        }
+    except (KeyError, TypeError, OSError, json.JSONDecodeError) as error:
+        raise ValueError("Graph manifest lacks required training artifact hashes.") from error
+    return metadata
 
-    print(f" Starting Multi-Seed Run: {experiment_name}")
-    print(f"   Seeds: {seeds}")
-    print("-" * 60)
 
+def _file_sha256(path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_model_config(model_config: dict[str, Any]) -> None:
+    required = {
+        "model_name", "type", "model_params", "extra_params", "data_params",
+        "temporal", "temporal_memory_policy", "variant", "threshold",
+        "selection_metric",
+    }
+    missing = sorted(required - set(model_config))
+    if missing:
+        raise ValueError(f"Model configuration is missing required fields: {missing}.")
+    for key in ("model_params", "extra_params", "data_params"):
+        if not isinstance(model_config[key], dict):
+            raise TypeError(f"model_config.{key} must be a dictionary.")
+    if not isinstance(model_config["temporal"], bool):
+        raise TypeError("model_config.temporal must be a boolean.")
+    if not isinstance(model_config["variant"], str) or not model_config["variant"]:
+        raise ValueError("model_config.variant must be a non-empty string.")
+    memory_policy = model_config["temporal_memory_policy"]
+    if not isinstance(memory_policy, str) or not memory_policy:
+        raise ValueError("model_config.temporal_memory_policy must be a non-empty string.")
+    if model_config["temporal"] and memory_policy == "none":
+        raise ValueError("Temporal models must declare a temporal memory policy.")
+    if not model_config["temporal"] and memory_policy != "none":
+        raise ValueError("Non-temporal models must use temporal_memory_policy='none'.")
+    if model_config["selection_metric"] != SELECTION_METRIC:
+        raise ValueError(f"Checkpoint selection metric must be {SELECTION_METRIC!r}.")
+
+    extra = model_config["extra_params"]
+    for key in ("learning_rate", "pos_weight", "batch_steps"):
+        if key not in extra:
+            raise ValueError(f"model_config.extra_params is missing {key!r}.")
+    learning_rate = float(extra["learning_rate"])
+    pos_weight = float(extra["pos_weight"])
+    if (
+        not math.isfinite(learning_rate)
+        or not math.isfinite(pos_weight)
+        or learning_rate <= 0
+        or pos_weight <= 0
+    ):
+        raise ValueError("learning_rate and pos_weight must be positive.")
+    if not isinstance(extra["batch_steps"], int) or extra["batch_steps"] <= 0:
+        raise ValueError("batch_steps must be positive.")
+    if not model_config["data_params"].get("label_correction_version"):
+        raise ValueError("data_params.label_correction_version must be recorded.")
+
+    threshold = model_config["threshold"]
+    if not isinstance(threshold, dict) or "strategy" not in threshold:
+        raise ValueError("model_config.threshold must declare a strategy.")
+    strategy = threshold["strategy"]
+    min_precision = threshold.get("min_precision")
+    if strategy == "max_f1" and min_precision is not None:
+        raise ValueError("max_f1 threshold configuration must omit min_precision.")
+    if strategy == "constrained" and (
+        min_precision is None or not 0 <= float(min_precision) <= 1
+    ):
+        raise ValueError(
+            "constrained threshold configuration requires min_precision in [0, 1]."
+        )
+    if strategy not in THRESHOLD_STRATEGIES:
+        raise ValueError(f"Unknown threshold strategy {strategy!r}.")
+
+
+def _safe_run_component(value: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-") or "unknown"
+
+
+def _configuration_sha256(configuration: dict[str, Any]) -> str:
+    import hashlib
+
+    encoded = json.dumps(
+        configuration,
+        cls=NumpyEncoder,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def run_multiple_seeds(
+    model_class,
+    model_config,
+    train_loader,
+    val_loader,
+    manager,
+    seeds=(42, 123, 777, 2024, 99),
+    epochs=60,
+    device="cpu",
+    experiment_name="experiment",
+    json_dir="./logs",
+    plots_dir="./plots",
+):
+    """Train multiple seeds using AP-selected checkpoints and frozen metadata."""
+    _validate_model_config(model_config)
+    if epochs <= 0:
+        raise ValueError("epochs must be positive.")
+    train_metadata = _dataset_metadata(train_loader)
+    val_metadata = _dataset_metadata(val_loader)
+    comparable_keys = (
+        "graph_root", "graph_manifest_sha256", "corrected_manifest_sha256",
+        "corrected_data_sha256", "correction_rule_version", "feature_profile",
+        "feature_schema_sha256", "edge_dim", "window_ms",
+        "graph_collection_sha256", "scaler_sha256", "mapping_sha256",
+        "checksum_index_sha256", "provenance_collection_sha256", "input_csv_sha256",
+    )
+    if any(train_metadata[key] != val_metadata[key] for key in comparable_keys):
+        raise ValueError("Train and validation loaders do not share the same graph artifacts.")
+    if train_metadata["split"] != "train" or val_metadata["split"] != "val":
+        raise ValueError("run_multiple_seeds requires train and val dataset splits.")
+    configured_edge_dim = model_config["model_params"].get("edge_dim")
+    if configured_edge_dim != train_metadata["edge_dim"]:
+        raise ValueError(
+            "model_params.edge_dim does not match the selected feature schema."
+        )
+    configured_rule = model_config["data_params"]["label_correction_version"]
+    if configured_rule != train_metadata["correction_rule_version"]:
+        raise ValueError(
+            "Configured label correction version does not match the corrected-data manifest."
+        )
+
+    output_dir = os.path.join(json_dir, experiment_name)
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(plots_dir, experiment_name), exist_ok=True)
+    code_version = _git_code_version()
     all_thresholds = {}
 
     for seed in seeds:
-        t0_seed = time.perf_counter()
-        t_train_total = 0.0
-        t_eval_total = 0.0
-        t_threshold_total = 0.0
-
-        tz = timezone(timedelta(hours=-3))  # Argentina
-        run_ts = datetime.now(tz).strftime("%Y%m%d_%H%M%S")
-        run_id = f"{experiment_name}_seed{seed}_{run_ts}"
-
+        started = time.perf_counter()
+        train_seconds = 0.0
+        validation_seconds = 0.0
+        threshold_seconds = 0.0
+        tz = timezone(timedelta(hours=-3))
+        run_timestamp = datetime.now(tz).strftime("%Y%m%d_%H%M%S")
+        code_id = code_version[:8] + ("-dirty" if code_version.endswith("-dirty") else "")
+        run_id = "_".join((
+            train_metadata["graph_manifest_sha256"][:8],
+            _safe_run_component(train_metadata["feature_profile"]),
+            _safe_run_component(experiment_name),
+            _safe_run_component(model_config["variant"]),
+            f"seed{seed}",
+            _safe_run_component(code_id),
+            run_timestamp,
+        ))
         print(f"\nRunning seed {seed} | run_id={run_id}")
-
-        exp_id = f"{experiment_name}_seed{seed}"
-        print(f"\n{exp_id}")
-
-        # Preventive memory cleaning before loading anything
         gc.collect()
-        torch.cuda.empty_cache()
-
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         set_seed(seed)
 
-        # Update model_config
-        model_config['model_name'] = exp_id
-        model_config.setdefault("extra_params", {})
-        model_config["extra_params"]["run_ts"] = run_ts
-        model_config["extra_params"]["run_id"] = run_id
+        run_config = copy.deepcopy(model_config)
+        run_config["model_name"] = f"{experiment_name}_seed{seed}"
+        run_config["selection_metric"] = SELECTION_METRIC
+        artifact_metadata = {
+            key: value for key, value in train_metadata.items() if key != "split"
+        }
+        run_config["data_params"].update(artifact_metadata)
+        run_config["data_params"].update({
+            "train_split": train_metadata["split"],
+            "validation_split": val_metadata["split"],
+        })
+        run_config["extra_params"].update({
+            "run_ts": run_timestamp,
+            "run_id": run_id,
+            "seed": seed,
+            "code_version": code_version,
+        })
+        model = model_class(**run_config["model_params"]).to(device)
+        validate_temporal_configuration(model, run_config["temporal"])
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=float(run_config["extra_params"]["learning_rate"])
+        )
+        criterion = make_flow_criterion(
+            float(run_config["extra_params"]["pos_weight"]), device
+        )
+        early_stopping = EarlyStopping(
+            patience=int(run_config["extra_params"].get("patience", 10)),
+            mode="max",
+            min_delta=float(run_config["extra_params"].get("min_delta", 0.0001)),
+            metric_name=SELECTION_METRIC,
+        )
 
-        # Instantiate model
-        model = model_class(**model_config['model_params']).to(device)
-
-        # Training setup
-        optimizer = torch.optim.Adam(model.parameters(), lr=model_config['extra_params']['learning_rate'])
-        pos_weight = torch.tensor([model_config['extra_params']['pos_weight']]).to(device)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-        early_stopping = EarlyStopping(patience=10, mode='max', min_delta=0.0001)
-
-        train_hist, val_loss_hist, val_auc_hist = [], [], []
-
-        is_temporal = 'GRU' in experiment_name or 'ST' in experiment_name
-
+        train_loss_history = []
+        validation_loss_history = []
+        validation_ap_history = []
+        gradient_norm_history = []
         for epoch in range(epochs):
-            # --- TRAIN ---
-            t0 = time.perf_counter()
-            loss_train = train_epoch(model, train_loader, optimizer, criterion,
-                                     device=device, is_temporal=is_temporal,
-                                     batch_steps=model_config['extra_params']["batch_steps"])
-            t_train_total += time.perf_counter() - t0
+            tick = time.perf_counter()
+            train_result = train_epoch(
+                model,
+                train_loader,
+                optimizer,
+                criterion,
+                device,
+                temporal=run_config["temporal"],
+                batch_steps=int(run_config["extra_params"]["batch_steps"]),
+                max_grad_norm=run_config["extra_params"].get("max_grad_norm"),
+            )
+            train_seconds += time.perf_counter() - tick
 
-            # --- EVAL ---
-            t0 = time.perf_counter()
-            val_loss, y_true, y_probs = evaluate(model, val_loader, criterion, device, is_temporal=is_temporal)
-            t_eval_total += time.perf_counter() - t0
-
-            val_auc = average_precision_score(y_true, y_probs)
-
-            train_hist.append(float(loss_train))
-            val_loss_hist.append(float(val_loss))
-            val_auc_hist.append(float(val_auc))
-
-            improved = early_stopping(val_auc, model, epoch)
-
+            tick = time.perf_counter()
+            validation_loss, y_true, y_probs = evaluate(
+                model, val_loader, criterion, device, temporal=run_config["temporal"]
+            )
+            validation_seconds += time.perf_counter() - tick
+            validation_ap = average_precision_score(y_true, y_probs)
+            train_loss_history.append(train_result.loss_per_flow)
+            validation_loss_history.append(float(validation_loss))
+            validation_ap_history.append(float(validation_ap))
+            gradient_norm_history.append(train_result.gradient_norm_max)
+            improved = early_stopping(validation_ap, model, epoch)
             if improved or (epoch + 1) % 10 == 0:
-                mark = "(*)" if improved else ""
-                print(f"   Ep {epoch+1} | Loss: {loss_train:.4f} | Val Loss: {val_loss:.4f} | Val AUC-PR: {val_auc:.4f} {mark}")
-
+                marker = " (*)" if improved else ""
+                print(
+                    f"Epoch {epoch + 1} | train loss/flow={train_result.loss_per_flow:.6f} "
+                    f"| val loss/flow={validation_loss:.6f} | val AP={validation_ap:.6f}{marker}"
+                )
             if early_stopping.early_stop:
-                print(f"   Early Stopping in epoch {epoch}")
+                print(f"Early stopping after epoch {epoch + 1}.")
                 break
 
+        if early_stopping.best_model_state is None:
+            raise RuntimeError("Early stopping did not capture a valid checkpoint.")
         model.load_state_dict(early_stopping.best_model_state)
-
-        # Re-evaluate best model to get clean probs
-        _, y_true_best, y_probs_best = evaluate(model, val_loader, criterion, device, is_temporal=is_temporal)
-
-        # Find optimal threshold
-        t0 = time.perf_counter()
-        best_th, _, _ = find_optimal_threshold(
-            model, val_loader, device, is_temporal, min_precision=0.90
+        _, y_true_best, y_probs_best = evaluate(
+            model, val_loader, criterion, device, temporal=run_config["temporal"]
         )
-        all_thresholds[f"seed_{seed}"] = best_th
-        t_threshold_total += time.perf_counter() - t0
 
-        # Compute all metrics
-        final_metrics = calculate_metrics_gnn(y_true_best, y_probs_best, prob_threshold=best_th)
-        final_metrics['optimal_threshold'] = best_th
-        final_metrics['stopped_epoch'] = len(train_hist)
-        final_metrics['seed'] = seed
-        final_metrics["run_ts"] = run_ts
-        final_metrics["run_id"] = run_id
-        final_metrics["time_total_sec"] = time.perf_counter() - t0_seed
-        final_metrics["time_train_sec"] = t_train_total
-        final_metrics["time_eval_sec"] = t_eval_total
-        final_metrics["time_threshold_sec"] = t_threshold_total
+        threshold_config = run_config["threshold"]
+        tick = time.perf_counter()
+        best_threshold, threshold_description = select_optimal_threshold(
+            y_true_best,
+            y_probs_best,
+            strategy=threshold_config["strategy"],
+            min_precision=threshold_config.get("min_precision"),
+        )
+        threshold_seconds += time.perf_counter() - tick
+        all_thresholds[f"seed_{seed}"] = best_threshold
 
-        print(f"   Final: Precision={final_metrics['Precision']:.4f} | "
-              f"Recall={final_metrics['Recall']:.4f} | F1={final_metrics['F1']:.4f} | "
-              f"F2={final_metrics['F2']:.4f} | AUC-PR={final_metrics['AUC-PR']:.4f} | "
-              f"FPR={final_metrics['FPR']:.5f}")
-
-        save_plots(train_hist, val_loss_hist, y_true_best, y_probs_best,
-                   seed, experiment_name, run_ts,
-                   save_dir=os.path.join(plots_dir, experiment_name))
-
+        final_metrics = calculate_metrics_gnn(
+            y_true_best, y_probs_best, prob_threshold=best_threshold
+        )
+        final_metrics.update({
+            "optimal_threshold": best_threshold,
+            "threshold_strategy": threshold_config["strategy"],
+            "threshold_selection": threshold_description,
+            "selection_metric": SELECTION_METRIC,
+            "best_validation_ap": float(early_stopping.best_score),
+            "best_epoch": int(early_stopping.best_epoch),
+            "stopped_epoch": len(train_loss_history),
+            "seed": seed,
+            "run_ts": run_timestamp,
+            "run_id": run_id,
+            "time_total_sec": time.perf_counter() - started,
+            "time_train_sec": train_seconds,
+            "time_eval_sec": validation_seconds,
+            "time_threshold_sec": threshold_seconds,
+        })
+        run_config["prob_threshold"] = best_threshold
+        run_config["extra_params"]["configuration_sha256"] = _configuration_sha256(
+            run_config
+        )
+        save_plots(
+            train_loss_history,
+            validation_loss_history,
+            y_true_best,
+            y_probs_best,
+            seed,
+            experiment_name,
+            run_timestamp,
+            save_dir=os.path.join(plots_dir, experiment_name),
+        )
         manager.log_experiment(
-            model_config=model_config,
+            model_config=run_config,
             metrics=final_metrics,
-            model_object=model
-        )
-
-        # Save training history JSON
-        filename_json = os.path.join(
-            json_dir, experiment_name,
-            f"training_history_{experiment_name}_seed{seed}_{run_ts}.json"
+            model_object=model,
         )
 
         history_payload = {
             "experiment_name": experiment_name,
-            "seed": seed,
-            "run_ts": run_ts,
             "run_id": run_id,
+            "configuration": run_config,
             "training": {
-                "train_loss": train_hist,
-                "val_loss": val_loss_hist,
-                "val_aucpr": val_auc_hist
+                "train_loss_per_flow": train_loss_history,
+                "validation_loss_per_flow": validation_loss_history,
+                "validation_average_precision": validation_ap_history,
+                "gradient_norm_max": gradient_norm_history,
             },
             "early_stopping": {
+                "metric": SELECTION_METRIC,
                 "best_epoch": int(early_stopping.best_epoch),
-                "best_val_aucpr": float(early_stopping.best_score),
-                "stopped_epoch": int(len(train_hist))
-            }
+                "best_score": float(early_stopping.best_score),
+                "stopped_epoch": len(train_loss_history),
+            },
         }
+        history_path = os.path.join(output_dir, f"training_history_{run_id}.json")
+        with open(history_path, "w", encoding="utf-8") as handle:
+            json.dump(history_payload, handle, cls=NumpyEncoder, indent=2)
+        print(f"Training history saved: {history_path}")
 
-        try:
-            with open(filename_json, 'w') as f:
-                json.dump(history_payload, f, cls=NumpyEncoder, indent=4)
-            print(f"Training history saved in: {filename_json}")
-        except Exception as e:
-            print(f"\nWarning: JSON could not be saved: {e}")
+    threshold_path = os.path.join(output_dir, f"thresholds_{experiment_name}.npz")
+    np.savez(threshold_path, **all_thresholds)
+    print(f"\nThresholds saved: {threshold_path}")
 
-        print(f"\n End seed {seed}")
-        print("-" * 60)
-
-    # Save thresholds for all seeds to .npz (preserves full float precision)
-    npz_path = os.path.join(json_dir, experiment_name,
-                            f"thresholds_{experiment_name}.npz")
-    np.savez(npz_path, **all_thresholds)
-    print(f"\nThresholds saved: {npz_path}")
-
-    # Print summary statistics across all seeds
-    df = pd.read_csv(manager.log_file)
-    df_exp = df[df["model_name"].str.contains(experiment_name)]
-
-    if len(df_exp) == 0:
-        print("No records found for this experiment.")
+    frame = pd.read_csv(manager.log_file)
+    selected = frame[frame["model_name"].astype(str).str.contains(experiment_name, regex=False)]
+    if selected.empty:
         return
-
-    def mean_std(series):
-        return series.mean(), series.std()
-
-    auc_mean,   auc_std   = mean_std(df_exp["AUC-PR"])
-    rec_mean,   rec_std   = mean_std(df_exp["Recall"])
-    ttot_mean,  ttot_std  = mean_std(df_exp["time_total_sec"])
-    ttrain_mean, ttrain_std = mean_std(df_exp["time_train_sec"])
-
-    print("=" * 50)
-    print(f" AVERAGE RESULT: {experiment_name}")
-    print(f"AUC-PR:      {auc_mean:.4f} ± {auc_std:.4f}")
-    print(f"Recall:      {rec_mean:.4f} ± {rec_std:.4f}")
-    print(f"Total Time:  {ttot_mean:.2f} ± {ttot_std:.2f} sec")
-    print(f"Train Time:  {ttrain_mean:.2f} ± {ttrain_std:.2f} sec")
-    print("=" * 50)
+    print("=" * 60)
+    print(f"VALIDATION SUMMARY: {experiment_name}")
+    print(f"AP: {selected['AUC-PR'].mean():.6f} ± {selected['AUC-PR'].std():.6f}")
+    print(f"Recall: {selected['Recall'].mean():.6f} ± {selected['Recall'].std():.6f}")
+    print("=" * 60)

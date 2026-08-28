@@ -28,7 +28,7 @@ def calculate_metrics_gnn(y_true, y_probs, prob_threshold=0.5):
     y_true = np.array(y_true)
     probs = np.array(y_probs)
 
-    preds = (probs > prob_threshold).astype(int)
+    preds = (probs >= prob_threshold).astype(int)
 
     prec = precision_score(y_true, preds, zero_division=0)
     rec  = recall_score(y_true, preds, zero_division=0)

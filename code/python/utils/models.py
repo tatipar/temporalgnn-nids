@@ -17,6 +17,8 @@ class SimpleMLP(nn.Module):
     node count, global node IDs, and timestamps.
     """
 
+    temporal = False
+
     def __init__(self, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None, node_dim=None):
         super().__init__()
         self.input_dim = edge_dim
@@ -237,6 +239,8 @@ class EdgeGRU_Baseline_NoX(nn.Module):
     memory keys.
     """
 
+    temporal = True
+
     def __init__(self, edge_dim, hidden_dim, dropout, output_bias_init=None, node_dim=None):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -357,6 +361,8 @@ class E_GraphSAGE(nn.Module):
     its documented all-ones constant initial node state internally.
     """
 
+    temporal = False
+
     def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None):
         super().__init__()
         self.node_dim = node_dim
@@ -404,6 +410,8 @@ class StaticGNN_Identity(nn.Module):
     Builds node features from edge aggregation (what each IP sends / receives),
     then runs two GATv2 layers for edge classification.
     """
+
+    temporal = False
 
     def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None):
         super(StaticGNN_Identity, self).__init__()
@@ -697,6 +705,8 @@ class ST_GNN_Identity(nn.Module):
     then runs two GATv2 layers followed by a GRU for temporal memory.
     """
 
+    temporal = True
+
     def __init__(self, node_dim, edge_dim, hidden_dim, dropout=0.2, output_bias_init=None):
         super(ST_GNN_Identity, self).__init__()
         self.hidden_dim = hidden_dim
@@ -795,4 +805,3 @@ class ST_GNN_Identity(nn.Module):
         # STEP 3: Edge classification
         edge_rep = torch.cat([h_current[src], h_current[dst], edge_attr], dim=1)
         return self.classifier(edge_rep)
-

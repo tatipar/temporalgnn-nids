@@ -5,12 +5,38 @@ import re
 
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn as nn
-from sklearn.metrics import precision_recall_curve
 
+from .experiment import load_model_checkpoint
 from .metrics import calculate_metrics_gnn
-from .training import evaluate
+from .training import (
+    evaluate,
+    make_flow_criterion,
+    select_optimal_threshold,
+    validate_temporal_configuration,
+)
+
+
+def _evaluation_protocol(model, model_config, device):
+    """Build and validate the explicitly configured evaluation protocol."""
+    if "temporal" not in model_config:
+        raise ValueError("model_config.temporal must be declared explicitly.")
+    temporal = model_config["temporal"]
+    validate_temporal_configuration(model, temporal)
+    try:
+        pos_weight = float(model_config["extra_params"]["pos_weight"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "model_config.extra_params.pos_weight must be a positive number."
+        ) from error
+    return temporal, make_flow_criterion(pos_weight, device)
+
+
+def _threshold_protocol(model_config):
+    """Return a complete, explicit validation-threshold configuration."""
+    threshold = model_config.get("threshold")
+    if not isinstance(threshold, dict) or "strategy" not in threshold:
+        raise ValueError("model_config.threshold must declare a strategy.")
+    return threshold["strategy"], threshold.get("min_precision")
 
 
 def extract_seed(text):
@@ -141,11 +167,11 @@ def change_threshold(model_class, model_config, val_loader, experiment_name,
                      device='cpu', results_dir="./results_earlystopping",
                      verbose=False):
     """
-    Re-compute optimal thresholds for all seeds of an experiment using max-F1.
+    Re-compute validation thresholds using the configured strategy.
 
     Loads each trained model, re-evaluates on the validation set, finds the
-    threshold that maximises F1, saves the updated metrics CSV and a .npz
-    with per-seed thresholds.
+    configured threshold, saves the updated metrics CSV and a .npz with
+    per-seed thresholds.
 
     Parameters
     ----------
@@ -174,10 +200,6 @@ def change_threshold(model_class, model_config, val_loader, experiment_name,
         model_config['type']       = df_exp['type']
         run_id                     = df_exp['extra_run_id']
 
-        pos_weight  = torch.tensor([model_config['extra_params']['pos_weight']]).to(device)
-        criterion   = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        is_temporal = 'GRU' in experiment_name or 'ST' in experiment_name
-
         if verbose:
             print(f"\nChanging threshold for: {model_config['model_name']}")
             print("\n OLD METRICS (MAX RECALL FOR PRECISION=0.9):")
@@ -193,24 +215,27 @@ def change_threshold(model_class, model_config, val_loader, experiment_name,
             continue
 
         model = model_class(**model_config['model_params']).to(device)
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        temporal, criterion = _evaluation_protocol(model, model_config, device)
+        load_model_checkpoint(model, model_path, map_location=device)
         model.eval()
 
-        _, y_true, y_probs = evaluate(model, val_loader, criterion, device, is_temporal)
-
-        precisions, recalls, thresholds = precision_recall_curve(y_true, y_probs)
-        precisions = precisions[:-1]
-        recalls    = recalls[:-1]
-        f1_scores  = 2 * (precisions * recalls) / (precisions + recalls + 1e-10)
-        best_idx   = np.argmax(f1_scores)
-        new_best_th = thresholds[best_idx]
+        _, y_true, y_probs = evaluate(
+            model, val_loader, criterion, device, temporal=temporal
+        )
+        strategy, min_precision = _threshold_protocol(model_config)
+        new_best_th, _ = select_optimal_threshold(
+            y_true,
+            y_probs,
+            strategy=strategy,
+            min_precision=min_precision,
+        )
         all_optimal_thresholds[f"seed_{seed}"] = new_best_th
 
         new_metrics = calculate_metrics_gnn(y_true, y_probs, prob_threshold=new_best_th)
         new_metrics['optimal_threshold'] = new_best_th
 
         if verbose:
-            print("\n NEW METRICS (MAX F1):")
+            print(f"\n NEW METRICS ({strategy}):")
             print(f" Precision: {new_metrics['Precision']:.4f} | Recall: {new_metrics['Recall']:.4f} | "
                   f"F1: {new_metrics['F1']:.4f} | F2: {new_metrics['F2']:.4f} | "
                   f"AUC-PR: {new_metrics['AUC-PR']:.4f} | AUC-ROC: {new_metrics['AUC-ROC']:.4f} | "
@@ -239,8 +264,8 @@ def compute_and_save_thresholds(model_class, model_config, val_loader,
                                 experiment_name, device,
                                 results_dir="./results_earlystopping"):
     """
-    Re-evaluate each seed on the validation set, compute the max-F1 threshold,
-    and save results to thresholds_<experiment_name>.npz.
+    Re-evaluate each seed on validation, apply the configured threshold
+    strategy, and save results to thresholds_<experiment_name>.npz.
 
     Use this for experiments trained before run_multiple_seeds saved the .npz
     automatically (i.e. experiments that have run_metrics_*.csv but no .npz).
@@ -262,10 +287,6 @@ def compute_and_save_thresholds(model_class, model_config, val_loader,
         return
 
     df_metrics = pd.read_csv(csv_files[0])
-    is_temporal = 'GRU' in experiment_name or 'ST' in experiment_name
-    pos_weight  = torch.tensor([model_config['extra_params']['pos_weight']]).to(device)
-    criterion   = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
     all_thresholds = {}
 
     for exp_id in range(len(df_metrics)):
@@ -284,15 +305,18 @@ def compute_and_save_thresholds(model_class, model_config, val_loader,
             continue
 
         model = model_class(**model_config['model_params']).to(device)
-        model.load_state_dict(torch.load(model_path, map_location=device))
-
-        from sklearn.metrics import precision_recall_curve
-        _, y_true, y_probs = evaluate(model, val_loader, criterion, device, is_temporal)
-        precisions, recalls, thresholds = precision_recall_curve(y_true, y_probs)
-        precisions = precisions[:-1]
-        recalls    = recalls[:-1]
-        f1_scores  = 2 * (precisions * recalls) / (precisions + recalls + 1e-10)
-        best_th    = thresholds[np.argmax(f1_scores)]
+        temporal, criterion = _evaluation_protocol(model, model_config, device)
+        load_model_checkpoint(model, model_path, map_location=device)
+        _, y_true, y_probs = evaluate(
+            model, val_loader, criterion, device, temporal=temporal
+        )
+        strategy, min_precision = _threshold_protocol(model_config)
+        best_th, _ = select_optimal_threshold(
+            y_true,
+            y_probs,
+            strategy=strategy,
+            min_precision=min_precision,
+        )
 
         all_thresholds[f"seed_{seed}"] = best_th
         print(f"  seed {seed}: threshold = {best_th:.16f}")
@@ -389,10 +413,6 @@ def evaluate_test1(model_class, model_config, test_loader, experiment_name,
         if verbose:
             print(f"\nEvaluating: {raw_model_name}")
 
-        pos_weight  = torch.tensor([model_config['extra_params']['pos_weight']]).to(device)
-        criterion   = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        is_temporal = 'GRU' in experiment_name or 'ST' in experiment_name
-
         model_paths = glob.glob(os.path.join(results_gral_dir, "saved_models", experiment_name, f"{run_id}_*.pth"))
         model_path  = model_paths[0] if model_paths else None
         if model_path is None:
@@ -400,10 +420,13 @@ def evaluate_test1(model_class, model_config, test_loader, experiment_name,
             continue
 
         model = model_class(**model_config['model_params']).to(device)
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        temporal, criterion = _evaluation_protocol(model, model_config, device)
+        load_model_checkpoint(model, model_path, map_location=device)
         model.eval()
 
-        _, y_true, y_probs = evaluate(model, test_loader, criterion, device, is_temporal)
+        _, y_true, y_probs = evaluate(
+            model, test_loader, criterion, device, temporal=temporal
+        )
         metrics = calculate_metrics_gnn(y_true, y_probs, prob_threshold=opt_th)
 
         if verbose:
@@ -414,7 +437,8 @@ def evaluate_test1(model_class, model_config, test_loader, experiment_name,
             print("-" * 60)
 
         df_new_row = pd.DataFrame([metrics])
-        for key, value in df_exp[['optimal_threshold', 'seed', 'run_id', 'model_name', 'type']].to_dict().items():
+        df_new_row['optimal_threshold'] = float(opt_th)
+        for key, value in df_exp[['seed', 'run_id', 'model_name', 'type']].to_dict().items():
             df_new_row[key] = value
         all_results.append(df_new_row)
 
@@ -480,10 +504,6 @@ def evaluate_test2(model_class, model_config, test_loader, experiment_name,
         if verbose:
             print(f"\nEvaluating: {raw_model_name}")
 
-        pos_weight  = torch.tensor([model_config['extra_params']['pos_weight']]).to(device)
-        criterion   = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        is_temporal = 'GRU' in experiment_name or 'ST' in experiment_name
-
         model_paths = glob.glob(os.path.join(results_gral_dir, "saved_models", experiment_name, f"{run_id}_*.pth"))
         model_path  = model_paths[0] if model_paths else None
         if model_path is None:
@@ -491,10 +511,13 @@ def evaluate_test2(model_class, model_config, test_loader, experiment_name,
             continue
 
         model = model_class(**model_config['model_params']).to(device)
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        temporal, criterion = _evaluation_protocol(model, model_config, device)
+        load_model_checkpoint(model, model_path, map_location=device)
         model.eval()
 
-        _, y_true, y_probs = evaluate(model, test_loader, criterion, device, is_temporal)
+        _, y_true, y_probs = evaluate(
+            model, test_loader, criterion, device, temporal=temporal
+        )
         metrics = calculate_metrics_gnn(y_true, y_probs, prob_threshold=opt_th)
 
         if verbose:
@@ -505,7 +528,8 @@ def evaluate_test2(model_class, model_config, test_loader, experiment_name,
             print("-" * 60)
 
         df_new_row = pd.DataFrame([metrics])
-        for key, value in df_exp[['optimal_threshold', 'seed', 'run_id', 'model_name', 'type']].iloc[0].to_dict().items():
+        df_new_row['optimal_threshold'] = float(opt_th)
+        for key, value in df_exp[['seed', 'run_id', 'model_name', 'type']].iloc[0].to_dict().items():
             df_new_row[key] = value
         all_results.append(df_new_row)
 

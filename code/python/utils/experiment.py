@@ -31,10 +31,11 @@ class EarlyStopping:
                 'min' for metrics that should decrease (Loss)
     """
 
-    def __init__(self, patience=10, min_delta=0.0001, mode='max'):
+    def __init__(self, patience=10, min_delta=0.0001, mode='max', metric_name=None):
         self.patience  = patience
         self.min_delta = min_delta
         self.mode      = mode
+        self.metric_name = metric_name
         self.counter   = 0
         self.early_stop = False
         self.best_score       = -np.inf if mode == 'max' else np.inf
@@ -64,6 +65,21 @@ class EarlyStopping:
             return False
 
 
+def load_model_checkpoint(model, path, map_location="cpu"):
+    """Load a self-describing checkpoint or a historical raw state dictionary."""
+    import torch
+
+    try:
+        payload = torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        payload = torch.load(path, map_location=map_location)
+    if isinstance(payload, dict) and "model_state_dict" in payload:
+        model.load_state_dict(payload["model_state_dict"])
+        return payload
+    model.load_state_dict(payload)
+    return {"format_version": 1, "model_state_dict": payload}
+
+
 class ExperimentManager:
     """
     Log experiment results to CSV and optionally save model checkpoints.
@@ -88,11 +104,15 @@ class ExperimentManager:
 
     def __init__(self,
                  log_file="./logs/experiments_log.csv",
-                 model_dir="./saved_models"):
+                 model_dir="./saved_models",
+                 record_dir=None):
         self.log_file  = log_file
         self.model_dir = model_dir
-        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        log_parent = os.path.dirname(log_file) or "."
+        self.record_dir = record_dir or os.path.join(log_parent, "run_records")
+        os.makedirs(log_parent, exist_ok=True)
         os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(self.record_dir, exist_ok=True)
 
     def log_experiment(self,
                        model_config=None,
@@ -159,10 +179,28 @@ class ExperimentManager:
         if threshold is not None:
             entry["prob_threshold"] = threshold
 
-        entry.update({f"hp_{k}": v    for k, v in (model_params or {}).items()})
-        entry.update({f"data_{k}": v  for k, v in (data_params  or {}).items()})
-        entry.update({f"extra_{k}": v for k, v in {**extra_params, **params}.items()
-                      if k not in ("type", "prob_threshold")})
+        def csv_value(value):
+            if isinstance(value, (dict, list, tuple)):
+                return json.dumps(value, cls=NumpyEncoder, sort_keys=True)
+            return value
+
+        entry.update({f"hp_{k}": csv_value(v) for k, v in (model_params or {}).items()})
+        entry.update({f"data_{k}": csv_value(v) for k, v in (data_params or {}).items()})
+        if model_config is not None:
+            for key in (
+                "variant",
+                "temporal",
+                "temporal_memory_policy",
+                "selection_metric",
+                "threshold",
+            ):
+                if key in model_config:
+                    entry[f"protocol_{key}"] = csv_value(model_config[key])
+        entry.update({
+            f"extra_{k}": csv_value(v)
+            for k, v in {**extra_params, **params}.items()
+            if k not in ("type", "prob_threshold")
+        })
         entry.update(metrics)
 
         df_new = pd.DataFrame([entry])
@@ -172,6 +210,22 @@ class ExperimentManager:
             df_new.to_csv(self.log_file, mode="w", header=True,  index=False)
 
         print(f"\nExperiment recorded in {self.log_file}")
+
+        record_name = run_id or f"{mname}_{run_ts}"
+        record_path = os.path.join(self.record_dir, f"{record_name}.json")
+        run_record = {
+            "format_version": 2,
+            "run_id": run_id,
+            "timestamp": entry["timestamp"],
+            "configuration": copy.deepcopy(model_config) if model_config is not None else {
+                "model_name": mname,
+                "params": copy.deepcopy(params),
+            },
+            "metrics": copy.deepcopy(metrics),
+        }
+        with open(record_path, "w", encoding="utf-8") as handle:
+            json.dump(run_record, handle, cls=NumpyEncoder, indent=2, sort_keys=True)
+        print(f"Saved run record: {record_path}")
 
         if model_object is not None:
             metric_key = "AUC-PR" if "AUC-PR" in metrics else ("F1" if "F1" in metrics else None)
@@ -190,8 +244,18 @@ class ExperimentManager:
             if "sklearn" in str(type(model_object)):
                 import joblib
                 joblib.dump(model_object, f"{filepath}.joblib")
+                checkpoint_path = f"{filepath}.joblib"
             else:
                 import torch
-                torch.save(model_object.state_dict(), f"{filepath}.pth")
+                checkpoint_path = f"{filepath}.pth"
+                torch.save({
+                    "format_version": 2,
+                    "model_state_dict": model_object.state_dict(),
+                    "configuration": copy.deepcopy(model_config),
+                    "metrics": copy.deepcopy(metrics),
+                    "run_id": run_id,
+                }, checkpoint_path)
 
-            print(f"Saved model: {filepath}")
+            print(f"Saved model: {checkpoint_path}")
+            return {"run_record": record_path, "checkpoint": checkpoint_path}
+        return {"run_record": record_path, "checkpoint": None}
