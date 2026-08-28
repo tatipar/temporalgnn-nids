@@ -23,11 +23,13 @@ from sklearn.metrics import average_precision_score, precision_recall_curve
 
 from .experiment import EarlyStopping, NumpyEncoder
 from .metrics import calculate_metrics_gnn
+from .temporal_state import IDENTITY_MODES, MEMORY_POLICIES
 from .visualization import save_plots
 
 
 SELECTION_METRIC = "average_precision"
 THRESHOLD_STRATEGIES = frozenset({"max_f1", "constrained"})
+TEMPORAL_POLICIES = MEMORY_POLICIES | {"lagged_identity_only"}
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ class TrainingEpochResult:
     optimizer_steps: int
     gradient_norm_mean: float | None
     gradient_norm_max: float | None
+    temporal_diagnostics: dict[str, Any] | None
 
 
 def forward_graph(model, data):
@@ -53,7 +56,11 @@ def forward_graph(model, data):
     )
 
 
-def validate_temporal_configuration(model, temporal: bool) -> None:
+def validate_temporal_configuration(
+    model,
+    temporal: bool,
+    temporal_memory_policy: str | None = None,
+) -> None:
     """Fail when an explicit run configuration disagrees with the model."""
     if not isinstance(temporal, bool):
         raise TypeError("temporal must be declared explicitly as a boolean.")
@@ -67,6 +74,17 @@ def validate_temporal_configuration(model, temporal: bool) -> None:
             f"Temporal configuration mismatch for {type(model).__name__}: "
             f"config={temporal}, model={declared}."
         )
+    declared_policy = getattr(model, "temporal_memory_policy", None)
+    if temporal_memory_policy is not None:
+        if not isinstance(declared_policy, str):
+            raise ValueError(
+                f"Model {type(model).__name__} does not declare a memory policy."
+            )
+        if declared_policy != temporal_memory_policy:
+            raise ValueError(
+                f"Memory-policy mismatch for {type(model).__name__}: "
+                f"config={temporal_memory_policy!r}, model={declared_policy!r}."
+            )
     if temporal:
         missing = [
             method for method in ("reset_memory", "detach_all_memory")
@@ -76,6 +94,12 @@ def validate_temporal_configuration(model, temporal: bool) -> None:
             raise ValueError(
                 f"Temporal model {type(model).__name__} lacks required memory methods: {missing}."
             )
+
+
+def temporal_diagnostics(model) -> dict[str, Any] | None:
+    """Return bounded diagnostics exposed by a stateful model."""
+    getter = getattr(model, "get_temporal_diagnostics", None)
+    return getter() if callable(getter) else None
 
 
 def make_flow_criterion(pos_weight: float, device: str | torch.device):
@@ -190,6 +214,7 @@ def train_epoch(
         optimizer_steps=optimizer_steps,
         gradient_norm_mean=mean_gradient_norm,
         gradient_norm_max=max_gradient_norm,
+        temporal_diagnostics=temporal_diagnostics(model),
     )
 
 
@@ -421,12 +446,68 @@ def _validate_model_config(model_config: dict[str, Any]) -> None:
     memory_policy = model_config["temporal_memory_policy"]
     if not isinstance(memory_policy, str) or not memory_policy:
         raise ValueError("model_config.temporal_memory_policy must be a non-empty string.")
+    if memory_policy not in TEMPORAL_POLICIES | {"none"}:
+        choices = ", ".join(sorted(TEMPORAL_POLICIES | {"none"}))
+        raise ValueError(f"Unknown temporal memory policy {memory_policy!r}. Expected: {choices}.")
     if model_config["temporal"] and memory_policy == "none":
         raise ValueError("Temporal models must declare a temporal memory policy.")
     if not model_config["temporal"] and memory_policy != "none":
         raise ValueError("Non-temporal models must use temporal_memory_policy='none'.")
     if model_config["selection_metric"] != SELECTION_METRIC:
         raise ValueError(f"Checkpoint selection metric must be {SELECTION_METRIC!r}.")
+
+    model_params = model_config["model_params"]
+    configured_model_policy = model_params.get("memory_policy")
+    if memory_policy in MEMORY_POLICIES:
+        if configured_model_policy != memory_policy:
+            raise ValueError(
+                "model_params.memory_policy must match temporal_memory_policy."
+            )
+        time_scale_ms = model_params.get("time_scale_ms")
+        if not isinstance(time_scale_ms, int) or time_scale_ms <= 0:
+            raise ValueError(
+                "Timestamp-aware memory requires a positive integer "
+                "model_params.time_scale_ms."
+            )
+        if memory_policy == "exponential_decay":
+            half_life = model_params.get("decay_half_life_windows")
+            if (
+                not isinstance(half_life, (int, float))
+                or not math.isfinite(float(half_life))
+                or float(half_life) <= 0
+            ):
+                raise ValueError(
+                    "exponential_decay requires a positive finite "
+                    "model_params.decay_half_life_windows."
+                )
+        if memory_policy == "hard_reset":
+            max_gap_ms = model_params.get("max_gap_ms")
+            if not isinstance(max_gap_ms, int) or max_gap_ms <= 0:
+                raise ValueError(
+                    "hard_reset requires a positive integer model_params.max_gap_ms."
+                )
+    elif configured_model_policy is not None and configured_model_policy != "none":
+        raise ValueError(
+            "model_params.memory_policy must be 'none' when recurrent memory is disabled."
+        )
+
+    identity_mode = model_params.get("identity_mode")
+    if identity_mode is not None and identity_mode not in IDENTITY_MODES:
+        choices = ", ".join(sorted(IDENTITY_MODES))
+        raise ValueError(f"Unknown identity_mode {identity_mode!r}. Expected: {choices}.")
+    if identity_mode == "lagged":
+        window_ms = model_params.get("window_ms")
+        if not isinstance(window_ms, int) or window_ms <= 0:
+            raise ValueError(
+                "Lagged identity requires a positive integer model_params.window_ms."
+            )
+    if memory_policy == "lagged_identity_only" and identity_mode != "lagged":
+        raise ValueError(
+            "lagged_identity_only requires model_params.identity_mode='lagged'."
+        )
+    for flag in ("use_memory", "use_topology", "use_direct_edge_attr"):
+        if flag in model_params and not isinstance(model_params[flag], bool):
+            raise TypeError(f"model_params.{flag} must be a boolean.")
 
     extra = model_config["extra_params"]
     for key in ("learning_rate", "pos_weight", "batch_steps"):
@@ -461,6 +542,35 @@ def _validate_model_config(model_config: dict[str, Any]) -> None:
         )
     if strategy not in THRESHOLD_STRATEGIES:
         raise ValueError(f"Unknown threshold strategy {strategy!r}.")
+
+
+def validate_model_instance_configuration(
+    model, model_config: dict[str, Any]
+) -> None:
+    """Match architecture controls recorded in a run to the built model."""
+    validate_temporal_configuration(
+        model,
+        model_config["temporal"],
+        model_config["temporal_memory_policy"],
+    )
+    model_params = model_config["model_params"]
+    for attribute in (
+        "identity_mode",
+        "use_memory",
+        "use_topology",
+        "use_direct_edge_attr",
+    ):
+        if not hasattr(model, attribute):
+            continue
+        if attribute not in model_params:
+            raise ValueError(
+                f"model_params.{attribute} must be recorded explicitly for "
+                f"{type(model).__name__}."
+            )
+        if getattr(model, attribute) != model_params[attribute]:
+            raise ValueError(
+                f"Configured {attribute} does not match {type(model).__name__}."
+            )
 
 
 def _safe_run_component(value: Any) -> str:
@@ -514,6 +624,15 @@ def run_multiple_seeds(
         raise ValueError(
             "model_params.edge_dim does not match the selected feature schema."
         )
+    for field in ("time_scale_ms", "window_ms"):
+        configured_value = model_config["model_params"].get(field)
+        if (
+            configured_value is not None
+            and configured_value != train_metadata["window_ms"]
+        ):
+            raise ValueError(
+                f"model_params.{field} must match the graph-manifest window_ms."
+            )
     configured_rule = model_config["data_params"]["label_correction_version"]
     if configured_rule != train_metadata["correction_rule_version"]:
         raise ValueError(
@@ -567,7 +686,7 @@ def run_multiple_seeds(
             "code_version": code_version,
         })
         model = model_class(**run_config["model_params"]).to(device)
-        validate_temporal_configuration(model, run_config["temporal"])
+        validate_model_instance_configuration(model, run_config)
         optimizer = torch.optim.Adam(
             model.parameters(), lr=float(run_config["extra_params"]["learning_rate"])
         )
@@ -585,6 +704,8 @@ def run_multiple_seeds(
         validation_loss_history = []
         validation_ap_history = []
         gradient_norm_history = []
+        train_temporal_history = []
+        validation_temporal_history = []
         for epoch in range(epochs):
             tick = time.perf_counter()
             train_result = train_epoch(
@@ -609,6 +730,8 @@ def run_multiple_seeds(
             validation_loss_history.append(float(validation_loss))
             validation_ap_history.append(float(validation_ap))
             gradient_norm_history.append(train_result.gradient_norm_max)
+            train_temporal_history.append(train_result.temporal_diagnostics)
+            validation_temporal_history.append(temporal_diagnostics(model))
             improved = early_stopping(validation_ap, model, epoch)
             if improved or (epoch + 1) % 10 == 0:
                 marker = " (*)" if improved else ""
@@ -626,6 +749,7 @@ def run_multiple_seeds(
         _, y_true_best, y_probs_best = evaluate(
             model, val_loader, criterion, device, temporal=run_config["temporal"]
         )
+        final_temporal_diagnostics = temporal_diagnostics(model)
 
         threshold_config = run_config["threshold"]
         tick = time.perf_counter()
@@ -656,6 +780,7 @@ def run_multiple_seeds(
             "time_train_sec": train_seconds,
             "time_eval_sec": validation_seconds,
             "time_threshold_sec": threshold_seconds,
+            "final_temporal_diagnostics": final_temporal_diagnostics,
         })
         run_config["prob_threshold"] = best_threshold
         run_config["extra_params"]["configuration_sha256"] = _configuration_sha256(
@@ -686,6 +811,8 @@ def run_multiple_seeds(
                 "validation_loss_per_flow": validation_loss_history,
                 "validation_average_precision": validation_ap_history,
                 "gradient_norm_max": gradient_norm_history,
+                "train_temporal_diagnostics": train_temporal_history,
+                "validation_temporal_diagnostics": validation_temporal_history,
             },
             "early_stopping": {
                 "metric": SELECTION_METRIC,
@@ -693,6 +820,7 @@ def run_multiple_seeds(
                 "best_score": float(early_stopping.best_score),
                 "stopped_epoch": len(train_loss_history),
             },
+            "final_validation_temporal_diagnostics": final_temporal_diagnostics,
         }
         history_path = os.path.join(output_dir, f"training_history_{run_id}.json")
         with open(history_path, "w", encoding="utf-8") as handle:

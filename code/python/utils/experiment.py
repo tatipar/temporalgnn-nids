@@ -201,7 +201,7 @@ class ExperimentManager:
             for k, v in {**extra_params, **params}.items()
             if k not in ("type", "prob_threshold")
         })
-        entry.update(metrics)
+        entry.update({key: csv_value(value) for key, value in metrics.items()})
 
         df_new = pd.DataFrame([entry])
         if os.path.exists(self.log_file):

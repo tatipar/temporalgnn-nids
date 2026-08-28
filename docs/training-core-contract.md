@@ -4,7 +4,9 @@
 
 This document defines the Phase-2 optimization, model-selection, threshold,
 and run-persistence protocol. It applies to all five production models and both
-feature profiles.
+feature profiles. The Phase-3 policies that supersede the original carry-only
+temporal behavior are defined in
+[`temporal-state-and-ablation-contract.md`](temporal-state-and-ablation-contract.md).
 
 ## Flow-level optimization
 
@@ -35,23 +37,20 @@ configuration must contain a matching `temporal` value and an explicit
 `temporal_memory_policy`. No model behavior is inferred from an experiment
 name.
 
-The current base policies are:
+The available Phase-3 base policies are:
 
 | Model | `temporal` | `temporal_memory_policy` |
 |---|---:|---|
 | `SimpleMLP` | `false` | `none` |
-| `EdgeGRU_Baseline_NoX` | `true` | `reset_each_sequence_carry_across_nonempty_windows_no_decay` |
-| `StaticGNN_Identity` | `false` | `none` |
-| `ST_GNN_Identity` | `true` | `reset_each_sequence_carry_across_nonempty_windows_no_decay` |
+| `EdgeGRU_Baseline_NoX` | `true` | `exponential_decay`, `hard_reset`, or `carry_no_decay` |
+| `StaticGNN_Identity` | `false` for current; `true` for lagged | `none` or `lagged_identity_only` |
+| `ST_GNN_Identity` | depends on memory and identity controls | recurrent policy, `lagged_identity_only`, or `none` |
 | `E_GraphSAGE` | `false` | `none` |
 
 Here, a sequence is one complete chronological pass through a split: one
 training epoch or one validation/test evaluation. Temporal models must
-implement `reset_memory()` and `detach_all_memory()`.
-Training and evaluation fail immediately if the configuration and model
-capability disagree. The elapsed-time decay and lagged-identity changes remain
-separate later-phase model variants; the policy above records the exact Phase-2
-behavior rather than implying that decay is already implemented.
+implement `reset_memory()` and `detach_all_memory()`. Training and evaluation
+fail immediately if the configuration and model capability or policy disagree.
 
 ## Validation selection and thresholds
 

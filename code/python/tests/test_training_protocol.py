@@ -1,3 +1,4 @@
+import csv
 import json
 import math
 from pathlib import Path
@@ -22,6 +23,7 @@ from utils.experiment import (  # noqa: E402
 from utils.metrics import calculate_metrics_gnn  # noqa: E402
 from utils.training import (  # noqa: E402
     SELECTION_METRIC,
+    _validate_model_config,
     make_flow_criterion,
     select_optimal_threshold,
     train_epoch,
@@ -54,6 +56,7 @@ class ScalarFlowModel(nn.Module):
     """Emit one shared trainable logit for every flow."""
 
     temporal = False
+    temporal_memory_policy = "none"
 
     def __init__(self):
         super().__init__()
@@ -72,6 +75,7 @@ class ScalarFlowModel(nn.Module):
 
 class TemporalStub(ScalarFlowModel):
     temporal = True
+    temporal_memory_policy = "carry_no_decay"
 
     def reset_memory(self):
         pass
@@ -141,6 +145,48 @@ class ExplicitProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Temporal configuration mismatch"):
             validate_temporal_configuration(TemporalStub(), False)
 
+    def test_temporal_memory_policy_must_match_model(self):
+        validate_temporal_configuration(
+            TemporalStub(), True, "carry_no_decay"
+        )
+        with self.assertRaisesRegex(ValueError, "Memory-policy mismatch"):
+            validate_temporal_configuration(
+                TemporalStub(), True, "hard_reset"
+            )
+
+    def test_decay_configuration_requires_explicit_time_parameters(self):
+        configuration = {
+            "model_name": "edge_gru",
+            "type": "temporal_baseline",
+            "model_params": {
+                "edge_dim": 4,
+                "hidden_dim": 8,
+                "dropout": 0.0,
+                "memory_policy": "exponential_decay",
+            },
+            "extra_params": {
+                "learning_rate": 1e-3,
+                "pos_weight": 1.0,
+                "batch_steps": 2,
+            },
+            "data_params": {"label_correction_version": "rules-v1"},
+            "temporal": True,
+            "temporal_memory_policy": "exponential_decay",
+            "variant": "base",
+            "threshold": {"strategy": "max_f1"},
+            "selection_metric": "average_precision",
+        }
+
+        with self.assertRaisesRegex(ValueError, "time_scale_ms"):
+            _validate_model_config(configuration)
+
+        configuration["model_params"]["time_scale_ms"] = 30_000
+        with self.assertRaisesRegex(ValueError, "decay_half_life_windows"):
+            _validate_model_config(configuration)
+
+        configuration["model_params"]["decay_half_life_windows"] = 20.0
+        _validate_model_config(configuration)
+
     def test_probability_equal_to_threshold_is_positive(self):
         metrics = calculate_metrics_gnn(
             y_true=np.array([1, 0]),
@@ -208,7 +254,14 @@ class ExperimentPersistenceTests(unittest.TestCase):
                 "code_version": "commit-hash",
             },
         }
-        metrics = {"AUC-PR": 0.75, "best_validation_ap": 0.75}
+        metrics = {
+            "AUC-PR": 0.75,
+            "best_validation_ap": 0.75,
+            "final_temporal_diagnostics": {
+                "memory_policy": "none",
+                "gap_count": 0,
+            },
+        }
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -226,6 +279,14 @@ class ExperimentPersistenceTests(unittest.TestCase):
             record = json.loads(Path(paths["run_record"]).read_text(encoding="utf-8"))
             self.assertEqual(record["configuration"], configuration)
             self.assertEqual(record["metrics"], metrics)
+            with (root / "logs" / "runs.csv").open(
+                encoding="utf-8", newline=""
+            ) as handle:
+                csv_record = next(csv.DictReader(handle))
+            self.assertEqual(
+                json.loads(csv_record["final_temporal_diagnostics"]),
+                metrics["final_temporal_diagnostics"],
+            )
 
             restored = ScalarFlowModel()
             payload = load_model_checkpoint(restored, paths["checkpoint"])

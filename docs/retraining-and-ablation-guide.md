@@ -430,6 +430,9 @@ small changes to support the new protocol:
 
 ### 4.5 Temporal memory and elapsed time
 
+The implemented Phase-3 behavior and exact experiment parameters are frozen in
+[`temporal-state-and-ablation-contract.md`](temporal-state-and-ablation-contract.md).
+
 Per-IP memory must store both hidden state and last observed `decision_time`.
 When retrieving a node state:
 

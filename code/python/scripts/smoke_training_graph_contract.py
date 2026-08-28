@@ -44,13 +44,32 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def make_models(edge_dim: int, node_dim: int, hidden_dim: int):
+def make_models(edge_dim: int, node_dim: int, hidden_dim: int, window_ms: int):
     common = {"edge_dim": edge_dim, "hidden_dim": hidden_dim, "dropout": 0.0}
+    temporal = {
+        "memory_policy": "exponential_decay",
+        "time_scale_ms": window_ms,
+        "decay_half_life_windows": 20.0,
+    }
     return {
         "simple_mlp": SimpleMLP(**common),
-        "edge_gru": EdgeGRU_Baseline_NoX(**common),
-        "static_gnn": StaticGNN_Identity(node_dim=node_dim, **common),
-        "st_gnn": ST_GNN_Identity(node_dim=node_dim, **common),
+        "edge_gru": EdgeGRU_Baseline_NoX(**common, **temporal),
+        "static_gnn": StaticGNN_Identity(
+            node_dim=node_dim,
+            identity_mode="current",
+            window_ms=window_ms,
+            **common,
+        ),
+        "st_gnn": ST_GNN_Identity(
+            node_dim=node_dim,
+            identity_mode="current",
+            use_memory=True,
+            use_topology=True,
+            use_direct_edge_attr=True,
+            window_ms=window_ms,
+            **common,
+            **temporal,
+        ),
         "e_graphsage": E_GraphSAGE(node_dim=node_dim, **common),
     }
 
@@ -67,7 +86,12 @@ def main() -> None:
         split=args.split,
         verify_checksums=args.verify_checksums,
     )
-    models = make_models(dataset.edge_dim, args.node_dim, args.hidden_dim)
+    models = make_models(
+        dataset.edge_dim,
+        args.node_dim,
+        args.hidden_dim,
+        dataset.window_ms,
+    )
     inspected_graphs = min(args.max_graphs, len(dataset))
     summaries = {}
 

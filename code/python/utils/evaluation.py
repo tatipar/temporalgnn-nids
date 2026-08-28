@@ -12,7 +12,7 @@ from .training import (
     evaluate,
     make_flow_criterion,
     select_optimal_threshold,
-    validate_temporal_configuration,
+    validate_model_instance_configuration,
 )
 
 
@@ -21,7 +21,10 @@ def _evaluation_protocol(model, model_config, device):
     if "temporal" not in model_config:
         raise ValueError("model_config.temporal must be declared explicitly.")
     temporal = model_config["temporal"]
-    validate_temporal_configuration(model, temporal)
+    memory_policy = model_config.get("temporal_memory_policy")
+    if not isinstance(memory_policy, str):
+        raise ValueError("model_config.temporal_memory_policy must be declared explicitly.")
+    validate_model_instance_configuration(model, model_config)
     try:
         pos_weight = float(model_config["extra_params"]["pos_weight"])
     except (KeyError, TypeError, ValueError) as error:
