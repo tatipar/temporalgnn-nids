@@ -51,7 +51,7 @@ def graph_kwargs(data):
         "edge_attr": data.edge_attr,
         "num_nodes": data.num_nodes,
         "global_node_ids": data.global_node_ids,
-        "timestamp": data.timestamp,
+        "timestamp": getattr(data, "timestamp", None),
     }
 
 
