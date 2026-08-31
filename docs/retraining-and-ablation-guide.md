@@ -86,11 +86,10 @@ profiles, and the complete suite passed with 65 tests. The exact model contract
 is documented in
 [`temporal-state-and-ablation-contract.md`](temporal-state-and-ablation-contract.md).
 
-### Phase 4A — calibration artifact: next task
+### Phase 4A — calibration artifact: implementation ready, Colab acceptance pending
 
-Do not start full retraining yet. Implement a reproducible calibration utility,
-CLI script, tests, and a thin orchestration notebook. The implementation should
-normally use these paths:
+Do not start full retraining yet. This phase uses a reproducible calibration
+utility, CLI script, tests, and a thin orchestration notebook at these paths:
 
 - `code/python/utils/calibration.py`;
 - `code/python/scripts/calibrate_pos_weight.py`;
@@ -112,6 +111,14 @@ The calibration step must:
 
 Phase 4A closes only when the artifact can be regenerated deterministically
 from the frozen graphs and all tests pass.
+
+The implementation is available in `utils/calibration.py` and the
+`calibrate_pos_weight.py` CLI, with formula/alignment/serialization coverage in
+`test_calibration.py`. Run the thin `calibrate_training_protocol.ipynb` notebook
+in Colab against the frozen Drive graph root. Preserve its full-suite output and
+the generated manifest hash here before marking Phase 4A complete. The CLI
+accepts an identical existing manifest as an unchanged deterministic rerun and
+refuses to replace a different artifact unless `--overwrite` is explicit.
 
 ### Phase 4B — validation-only calibration screening
 
