@@ -128,7 +128,7 @@ calibration manifest has SHA-256
 An immediate rerun returned `status="unchanged"` with the same hash, satisfying
 the deterministic-regeneration criterion. Phase 4B is the next task.
 
-### Phase 4B — validation-only calibration screening
+### Phase 4B — validation-only calibration screening: implementation ready
 
 After Phase 4A, use development seed `42` and `nfv3_extended`:
 
@@ -142,6 +142,34 @@ After Phase 4A, use development seed `42` and `nfv3_extended`:
 
 These runs are technical screening, not reportable model comparisons. Test1
 and Test2 remain untouched.
+
+The reproducible implementation uses:
+
+- `code/python/utils/calibration_screening.py` for manifest/source validation,
+  frozen configurations, plans, completion records, and summaries;
+- `code/python/scripts/screen_calibration.py` for resumable candidate runs;
+- `code/python/tests/test_calibration_screening.py` for protocol enforcement;
+- `code/python/notebook/screen_training_calibration.ipynb` as the thin Colab
+  orchestrator.
+
+The MLP screening plan freezes seed 42, `nfv3_extended`, 60 maximum epochs,
+hidden dimension 64, dropout 0.2, Adam learning rate 1e-3, 10 graph windows per
+optimization step, patience 10, minimum AP improvement 1e-4, AP checkpoint
+selection, and validation `max_f1` threshold selection. It must include all
+five candidates. Before training, the plan also freezes an absolute practical
+AP-equivalence margin of 0.005; the ST-GNN shortlist contains every candidate
+within 0.005 of the best validation AP, and the smaller weight is preferred
+inside that margin. Each completed candidate has an independently hashed run
+record and checkpoint, so an interrupted Colab session skips verified completed
+runs on restart.
+
+Run the MLP stage first and preserve its complete `screening_summary.json`.
+The notebook first runs the CLI with `--plan-only` so the exact plan can be
+inspected before the separate long-running training cell starts or resumes it.
+Do not enable the ST-GNN cell until the complete MLP ranking and the resulting
+predeclared-margin shortlist have been reviewed. The ST-GNN CLI requires that
+shortlist explicitly and freezes the full current-identity exponential-decay
+configuration.
 
 ### Phase 5 — model screening and confirmatory runs
 
