@@ -86,7 +86,7 @@ profiles, and the complete suite passed with 65 tests. The exact model contract
 is documented in
 [`temporal-state-and-ablation-contract.md`](temporal-state-and-ablation-contract.md).
 
-### Phase 4A — calibration artifact: implementation ready, Colab acceptance pending
+### Phase 4A — calibration artifact: complete
 
 Do not start full retraining yet. This phase uses a reproducible calibration
 utility, CLI script, tests, and a thin orchestration notebook at these paths:
@@ -114,11 +114,19 @@ from the frozen graphs and all tests pass.
 
 The implementation is available in `utils/calibration.py` and the
 `calibrate_pos_weight.py` CLI, with formula/alignment/serialization coverage in
-`test_calibration.py`. Run the thin `calibrate_training_protocol.ipynb` notebook
-in Colab against the frozen Drive graph root. Preserve its full-suite output and
-the generated manifest hash here before marking Phase 4A complete. The CLI
-accepts an identical existing manifest as an unchanged deterministic rerun and
-refuses to replace a different artifact unless `--overwrite` is explicit.
+`test_calibration.py`. The thin `calibrate_training_protocol.ipynb` notebook was
+run in Colab against the frozen Drive graph root at code revision
+`bf8f1e6ef173655d036b4ce5b604a67d4a57e144`. The complete 79-test suite passed.
+
+The two profiles each contained 624 training graphs and 806,873 flows, with the
+same target digest
+`da2eb7b54d4709cafbb3a4a441278cf1d541176a772762c346aa6e636c0f666a`.
+The frozen counts are 779,777 negative and 27,096 positive flows, giving
+prevalence 0.03358149299827854 and class ratio 28.778306761145558. The generated
+calibration manifest has SHA-256
+`fc1c301ae3273a0328dfae41566d4fdbf6b8332e7780ce1b519137ae693f33b1`.
+An immediate rerun returned `status="unchanged"` with the same hash, satisfying
+the deterministic-regeneration criterion. Phase 4B is the next task.
 
 ### Phase 4B — validation-only calibration screening
 
