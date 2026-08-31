@@ -29,6 +29,120 @@ such as the DAPT2020 pilot with `Stage`.
   *out-of-day holdout*. Neither proves generalization to independent campaigns.
 - Flow-level metrics require a loss weighted by flow, not by graph window.
 
+## Current handoff and phased roadmap
+
+This section is the durable handoff for new development sessions. Update it
+whenever a phase closes so that the next task can be recovered from the
+repository without relying on conversation history. The detailed scientific
+protocol remains in the numbered sections below.
+
+### Completed prerequisite: corrected data and audited graphs
+
+The corrected labels, 30-second episode-aware graphs, feature schemas,
+scalers, provenance, mappings, checksums, and graph manifest have been built
+and audited. Both `nfv3_extended` (40 edge features) and `portable_core` (18
+edge features) contain 624 chronological training graphs in the frozen graph
+artifact used for the current retraining round.
+
+### Phase 1 — training graph contract: complete
+
+Implemented primarily in commits `bfa2046` and `3637eea`:
+
+- `NF_IDS_Dataset` receives `graph_root`, `profile`, and `split`;
+- graph and feature manifests, hashes, dimensions, timestamps, and graph counts
+  are validated;
+- all five production models share one forward interface and do not depend on
+  persisted `data.x`;
+- realistic no-`x` forward tests and a two-profile smoke notebook are present.
+
+### Phase 2 — training protocol: complete
+
+Implemented primarily in commits `8a4bb30` and `052b269`:
+
+- BCE loss is accumulated and normalized by flow rather than graph window;
+- temporal behavior and TBPTT block length are explicit configuration;
+- every decision path uses `probability >= threshold`;
+- validation AP selects the early-stopping checkpoint;
+- complete configuration, artifact hashes, threshold policy, and run metadata
+  are persisted;
+- unequal-window tests prove that optimization is invariant to how flows are
+  partitioned across graph windows.
+
+### Phase 3 — temporal state and controlled ablations: complete
+
+Implemented primarily in commits `ae5ff17`, `f77ba58`, and `90b3765`:
+
+- EdgeGRU and ST-GNN use decision timestamps, per-node `last_seen`, and an
+  explicit gap policy;
+- exponential decay, hard reset, and carry-without-decay are implemented;
+- current and strict previous-window identity are configurable;
+- ST-GNN exposes no-memory, no-topology, and no-direct-edge-attribute controls;
+- E-GraphSAGE constructs its constant initial node state internally;
+- state resets prevent transfer between epochs and dataset splits;
+- temporal gaps, resets, and learned decay are recorded.
+
+Acceptance evidence: smoke forwards passed for all five models on both feature
+profiles, and the complete suite passed with 65 tests. The exact model contract
+is documented in
+[`temporal-state-and-ablation-contract.md`](temporal-state-and-ablation-contract.md).
+
+### Phase 4A — calibration artifact: next task
+
+Do not start full retraining yet. Implement a reproducible calibration utility,
+CLI script, tests, and a thin orchestration notebook. The implementation should
+normally use these paths:
+
+- `code/python/utils/calibration.py`;
+- `code/python/scripts/calibrate_pos_weight.py`;
+- `code/python/tests/test_calibration.py`;
+- `code/python/notebook/calibrate_training_protocol.ipynb`.
+
+The calibration step must:
+
+1. read labels only from the frozen training split;
+2. verify that aligned feature profiles contain identical targets;
+3. record negative/positive flow counts, prevalence, and class ratio;
+4. generate the predeclared candidate grid described in section 5;
+5. pair every candidate with its mathematically corresponding output bias;
+6. write a `calibration_manifest.json` containing the graph-manifest hash,
+   feature-schema hashes, correction version, code revision, counts, formulas,
+   candidates, and biases;
+7. include unit tests for formulas, candidate deduplication, invalid labels,
+   empty classes, profile disagreement, and deterministic serialization.
+
+Phase 4A closes only when the artifact can be regenerated deterministically
+from the frozen graphs and all tests pass.
+
+### Phase 4B — validation-only calibration screening
+
+After Phase 4A, use development seed `42` and `nfv3_extended`:
+
+1. train SimpleMLP once for every frozen weight/bias pair;
+2. select checkpoints by validation AP and select thresholds on validation;
+3. never judge a candidate using a fixed `0.5` threshold alone;
+4. shortlist the best candidates and check them with full ST-GNN;
+5. prefer the smaller weight when validation AP differences are practically
+   negligible;
+6. freeze the selected calibration before any confirmatory or test run.
+
+These runs are technical screening, not reportable model comparisons. Test1
+and Test2 remain untouched.
+
+### Phase 5 — model screening and confirmatory runs
+
+Run the one-seed screening and the five-seed matrix in section 6 after the
+calibration, model configurations, code revision, and experiment list are
+frozen. Do not use the historical training notebooks: create new orchestration
+that consumes the manifest-aware dataset and explicit Phase-2/Phase-3 model
+configuration.
+
+### Phase 6 — frozen test evaluation and reporting
+
+Evaluate Test1 and Test2 once per final checkpoint without changing weights,
+thresholds, features, or model selection. Then generate comparison tables, PR
+curves, latency and parameter-count summaries, and between-seed uncertainty.
+Only after this phase may the separate post-hoc analysis in section 8 begin.
+
 ## 1. Create a clean branch without destroying previous work
 
 Do not delete or rewrite `feat/fair-comparison-experiments`; it is the
@@ -481,11 +595,28 @@ bias_init = log(pos_weight * p_train / (1 - p_train))
 ```
 
 Bias is not a free hyperparameter. Use a small predeclared `pos_weight` grid,
-for example:
+anchored both in the new class ratio and in the historical observation that
+full inverse-frequency weighting overcompensated:
 
 ```text
-1, sqrt(n_negative / n_positive), n_negative / n_positive
+R = n_negative / n_positive
+
+1, 2, sqrt(R), R / 2, R
 ```
+
+Remove exact or near duplicates after computing the numeric values. The
+historical `2` is included as a candidate, not assumed to remain optimal.
+
+For weighted BCE, pair each candidate with:
+
+```text
+bias_init = log(pos_weight * n_positive / n_negative)
+```
+
+Do not independently cross every weight with arbitrary bias values. The old
+experiments combined an unweighted prevalence bias with weighted BCE and used
+a graph-window-weighted mean loss, so their preferred value cannot be copied
+directly into the corrected flow-weighted protocol.
 
 Select only with validation using AP for checkpoint selection and a
 validation-selected threshold. Run one development seed first; after freezing
