@@ -71,6 +71,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--local-resume-root", type=Path)
+    parser.add_argument("--resume-local-every-epochs", type=int, default=10)
+    parser.add_argument("--resume-sync-minutes", type=float, default=60.0)
     parser.add_argument("--verify-checksums", action="store_true")
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument(
@@ -152,6 +155,10 @@ def main() -> None:
     args = parse_args()
     if args.num_workers < 0:
         raise ValueError("--num-workers must be non-negative.")
+    if args.resume_local_every_epochs <= 0:
+        raise ValueError("--resume-local-every-epochs must be positive.")
+    if args.resume_sync_minutes <= 0:
+        raise ValueError("--resume-sync-minutes must be positive.")
 
     import torch
     from torch_geometric.loader import DataLoader
@@ -163,6 +170,16 @@ def main() -> None:
 
     graph_root = args.graph_root.expanduser().resolve()
     results_root = args.results_root.expanduser().resolve()
+    try:
+        graph_root.relative_to(Path("/content"))
+        graph_root_is_colab_local = True
+    except ValueError:
+        graph_root_is_colab_local = False
+    graph_read_policy = (
+        "checksum-verified local Colab cache"
+        if graph_root_is_colab_local and args.verify_checksums
+        else "caller-provided graph root"
+    )
     calibration, calibration_sha256 = load_calibration_manifest(
         args.calibration_manifest
     )
@@ -220,6 +237,9 @@ def main() -> None:
         hidden_dims=hidden_dims,
         device=str(device),
         num_workers=args.num_workers,
+        graph_reads=graph_read_policy,
+        resume_local_every_epochs=args.resume_local_every_epochs,
+        resume_sync_minutes=args.resume_sync_minutes,
         finalist_count=DEFAULT_FINALIST_COUNT,
         ap_equivalence_margin=args.ap_equivalence_margin,
     )
@@ -239,6 +259,11 @@ def main() -> None:
                 "hidden_dims": hidden_dims,
                 "seed": FACTORIAL_SEED,
                 "device": str(device),
+                "local_resume_root": (
+                    str(args.local_resume_root) if args.local_resume_root else None
+                ),
+                "resume_local_every_epochs": args.resume_local_every_epochs,
+                "resume_sync_minutes": args.resume_sync_minutes,
                 "test_splits_accessed": False,
             },
             indent=2,
@@ -251,6 +276,7 @@ def main() -> None:
         return
 
     persistent_workers = args.num_workers > 0
+    loader_generator = torch.Generator().manual_seed(FACTORIAL_SEED)
     train_loader = DataLoader(
         train_dataset,
         batch_size=1,
@@ -258,6 +284,7 @@ def main() -> None:
         num_workers=args.num_workers,
         persistent_workers=persistent_workers,
         pin_memory=False,
+        generator=loader_generator,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -266,6 +293,7 @@ def main() -> None:
         num_workers=args.num_workers,
         persistent_workers=persistent_workers,
         pin_memory=False,
+        generator=loader_generator,
     )
 
     invocation_started = time.perf_counter()
@@ -326,6 +354,17 @@ def main() -> None:
                 model_dir=configuration_root / "models",
                 record_dir=configuration_root / "run_records",
             )
+            local_resume_path = (
+                args.local_resume_root.expanduser().resolve()
+                / f"{configuration_id}.pth"
+                if args.local_resume_root is not None and not args.rerun
+                else None
+            )
+            durable_resume_path = (
+                None
+                if args.rerun
+                else configuration_root / "resume" / "latest.pth"
+            )
             run_multiple_seeds(
                 model_class=StaticGNN_Identity,
                 model_config=configuration,
@@ -338,6 +377,10 @@ def main() -> None:
                 experiment_name=f"phase4b_{configuration_id}",
                 json_dir=configuration_root / "histories",
                 plots_dir=configuration_root / "plots",
+                resume_state_path=local_resume_path,
+                durable_resume_state_path=durable_resume_path,
+                resume_local_every_epochs=args.resume_local_every_epochs,
+                resume_sync_seconds=args.resume_sync_minutes * 60.0,
             )
             existing = _find_latest_completed_run(
                 configuration_root,

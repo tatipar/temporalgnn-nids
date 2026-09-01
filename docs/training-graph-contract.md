@@ -36,6 +36,15 @@ against `artifact_checksums.json`. This option is recommended after copying a
 collection between storage systems. It is intentionally optional for repeated
 Drive-backed training because hashing every graph adds remote I/O.
 
+For long Colab screening, stage only the required train and validation graph
+files plus `graph_manifest.json`, `artifact_checksums.json`, the selected
+feature schema, and its scaler under `/content`. Check free space before the
+copy, retain a safety reserve, and verify every staged graph against the
+checksum index. Train from the local copy while keeping frozen manifests,
+completion artifacts, and low-frequency resume state in Drive. This avoids
+reloading every graph from Drive on every epoch without weakening provenance:
+the local manifest hash must equal the reviewed Drive manifest hash.
+
 `validate_all()` eagerly loads every graph and validates the complete split.
 Normal indexed access performs the same per-graph checks lazily.
 

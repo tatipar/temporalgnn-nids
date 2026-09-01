@@ -199,12 +199,21 @@ def build_staticgnn_factorial_plan(
     hidden_dims: Sequence[int],
     device: str,
     num_workers: int,
+    graph_reads: str = "caller-provided graph root",
+    resume_local_every_epochs: int = 10,
+    resume_sync_minutes: float = 60.0,
     finalist_count: int = DEFAULT_FINALIST_COUNT,
     ap_equivalence_margin: float = DEFAULT_AP_EQUIVALENCE_MARGIN,
 ) -> dict[str, Any]:
     """Freeze the complete factorial and its validation-only selection policy."""
     if not configurations:
         raise ValueError("The factorial plan requires configurations.")
+    if not graph_reads:
+        raise ValueError("graph_reads must be non-empty.")
+    if resume_local_every_epochs <= 0:
+        raise ValueError("resume_local_every_epochs must be positive.")
+    if not math.isfinite(resume_sync_minutes) or resume_sync_minutes <= 0:
+        raise ValueError("resume_sync_minutes must be positive and finite.")
     if finalist_count <= 0 or finalist_count > len(configurations):
         raise ValueError("finalist_count must fit inside the factorial.")
     if not math.isfinite(ap_equivalence_margin) or not 0 <= ap_equivalence_margin <= 1:
@@ -339,6 +348,14 @@ def build_staticgnn_factorial_plan(
             "shuffle": False,
             "num_workers": num_workers,
             "progress_output": "every checkpoint improvement and every tenth epoch",
+            "graph_reads": graph_reads,
+            "local_resume_every_epochs": int(resume_local_every_epochs),
+            "durable_resume_sync_minutes": float(resume_sync_minutes),
+            "durable_resume_policy": (
+                "first state at the local epoch interval or sync interval, "
+                "whichever comes first; then at most once per sync interval, "
+                "plus early stopping"
+            ),
         },
         "configurations": [
             {

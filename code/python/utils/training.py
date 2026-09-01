@@ -13,6 +13,7 @@ import re
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -342,10 +343,10 @@ def find_optimal_threshold(
     return threshold, y_true, y_probs
 
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: int, *, include_cuda: bool = True) -> None:
     """Set Python, NumPy, and PyTorch random seeds."""
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
+    if include_cuda and torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
@@ -589,6 +590,98 @@ def _configuration_sha256(configuration: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _atomic_torch_save(payload: dict[str, Any], path: str | os.PathLike[str]) -> None:
+    """Atomically replace one resumable training-state artifact."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    torch.save(payload, temporary)
+    os.replace(temporary, destination)
+
+
+def _load_torch_payload(path: Path) -> dict[str, Any]:
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, dict):
+        raise ValueError(f"Training resume state is not a mapping: {path}")
+    return payload
+
+
+def _resume_contract(
+    *,
+    model_config: dict[str, Any],
+    seed: int,
+    epochs: int,
+    experiment_name: str,
+    code_version: str,
+    train_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Identify the immutable inputs required for an exact epoch-boundary resume."""
+    return {
+        "model_configuration_sha256": _configuration_sha256(model_config),
+        "seed": int(seed),
+        "maximum_epochs": int(epochs),
+        "experiment_name": str(experiment_name),
+        "code_version": str(code_version),
+        "graph_manifest_sha256": train_metadata["graph_manifest_sha256"],
+        "feature_profile": train_metadata["feature_profile"],
+    }
+
+
+def _load_latest_resume_state(
+    paths: tuple[Path, ...], expected_contract: dict[str, Any]
+) -> tuple[Path, dict[str, Any]] | None:
+    candidates = []
+    for path in dict.fromkeys(paths):
+        if not path.is_file():
+            continue
+        payload = _load_torch_payload(path)
+        if payload.get("artifact_type") != "epoch_boundary_training_resume":
+            raise ValueError(f"Unrecognized training resume artifact: {path}")
+        if payload.get("contract") != expected_contract:
+            raise ValueError(
+                f"Training resume state does not match the frozen run contract: {path}"
+            )
+        next_epoch = payload.get("next_epoch")
+        if isinstance(next_epoch, bool) or not isinstance(next_epoch, int):
+            raise ValueError(f"Invalid next_epoch in training resume state: {path}")
+        if not 0 < next_epoch <= expected_contract["maximum_epochs"]:
+            raise ValueError(f"Out-of-range next_epoch in training resume state: {path}")
+        candidates.append((next_epoch, path.stat().st_mtime_ns, path, payload))
+    if not candidates:
+        return None
+    _, _, path, payload = max(candidates, key=lambda item: (item[0], item[1]))
+    return path, payload
+
+
+def _capture_rng_state(*, include_cuda: bool) -> dict[str, Any]:
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+    }
+    if include_cuda and torch.cuda.is_available():
+        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: dict[str, Any]) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
+    if "torch_cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+
+def _move_optimizer_state(optimizer, device: str) -> None:
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
+
+
 def run_multiple_seeds(
     model_class,
     model_config,
@@ -601,11 +694,21 @@ def run_multiple_seeds(
     experiment_name="experiment",
     json_dir="./logs",
     plots_dir="./plots",
+    resume_state_path=None,
+    durable_resume_state_path=None,
+    resume_local_every_epochs=10,
+    resume_sync_seconds=3600.0,
 ):
-    """Train multiple seeds using AP-selected checkpoints and frozen metadata."""
+    """Train seeds with AP checkpoints and optional exact epoch-boundary resume."""
     _validate_model_config(model_config)
     if epochs <= 0:
         raise ValueError("epochs must be positive.")
+    if resume_local_every_epochs <= 0:
+        raise ValueError("resume_local_every_epochs must be positive.")
+    if resume_sync_seconds <= 0:
+        raise ValueError("resume_sync_seconds must be positive.")
+    if (resume_state_path is not None or durable_resume_state_path is not None) and len(seeds) != 1:
+        raise ValueError("Explicit resume paths require exactly one seed per call.")
     train_metadata = _dataset_metadata(train_loader)
     val_metadata = _dataset_metadata(val_loader)
     comparable_keys = (
@@ -650,23 +753,56 @@ def run_multiple_seeds(
         train_seconds = 0.0
         validation_seconds = 0.0
         threshold_seconds = 0.0
+        expected_resume_contract = _resume_contract(
+            model_config=model_config,
+            seed=seed,
+            epochs=epochs,
+            experiment_name=experiment_name,
+            code_version=code_version,
+            train_metadata=train_metadata,
+        )
+        resume_paths = tuple(
+            Path(path)
+            for path in (resume_state_path, durable_resume_state_path)
+            if path is not None
+        )
+        loaded_resume = _load_latest_resume_state(
+            resume_paths, expected_resume_contract
+        )
+        resume_payload = loaded_resume[1] if loaded_resume is not None else None
         tz = timezone(timedelta(hours=-3))
-        run_timestamp = datetime.now(tz).strftime("%Y%m%d_%H%M%S")
+        run_timestamp = (
+            str(resume_payload["run_timestamp"])
+            if resume_payload is not None
+            else datetime.now(tz).strftime("%Y%m%d_%H%M%S")
+        )
         code_id = code_version[:8] + ("-dirty" if code_version.endswith("-dirty") else "")
-        run_id = "_".join((
-            train_metadata["graph_manifest_sha256"][:8],
-            _safe_run_component(train_metadata["feature_profile"]),
-            _safe_run_component(experiment_name),
-            _safe_run_component(model_config["variant"]),
-            f"seed{seed}",
-            _safe_run_component(code_id),
-            run_timestamp,
-        ))
-        print(f"\nRunning seed {seed} | run_id={run_id}", flush=True)
+        run_id = (
+            str(resume_payload["run_id"])
+            if resume_payload is not None
+            else "_".join((
+                train_metadata["graph_manifest_sha256"][:8],
+                _safe_run_component(train_metadata["feature_profile"]),
+                _safe_run_component(experiment_name),
+                _safe_run_component(model_config["variant"]),
+                f"seed{seed}",
+                _safe_run_component(code_id),
+                run_timestamp,
+            ))
+        )
+        if loaded_resume is None:
+            print(f"\nRunning seed {seed} | run_id={run_id}", flush=True)
+        else:
+            print(
+                f"\nResuming seed {seed} after completed epoch {resume_payload['next_epoch']} "
+                f"| state={loaded_resume[0]} | run_id={run_id}",
+                flush=True,
+            )
         gc.collect()
-        if torch.cuda.is_available():
+        uses_cuda = str(device).startswith("cuda")
+        if uses_cuda and torch.cuda.is_available():
             torch.cuda.empty_cache()
-        set_seed(seed)
+        set_seed(seed, include_cuda=uses_cuda)
 
         run_config = copy.deepcopy(model_config)
         run_config["model_name"] = f"{experiment_name}_seed{seed}"
@@ -684,6 +820,16 @@ def run_multiple_seeds(
             "run_id": run_id,
             "seed": seed,
             "code_version": code_version,
+            "resume_count": (
+                int(resume_payload.get("resume_count", 0)) + 1
+                if resume_payload is not None
+                else 0
+            ),
+            "resumed_from_epoch": (
+                int(resume_payload["next_epoch"])
+                if resume_payload is not None
+                else None
+            ),
         })
         model = model_class(**run_config["model_params"]).to(device)
         validate_model_instance_configuration(model, run_config)
@@ -706,7 +852,46 @@ def run_multiple_seeds(
         gradient_norm_history = []
         train_temporal_history = []
         validation_temporal_history = []
-        for epoch in range(epochs):
+        start_epoch = 0
+        elapsed_before_session = 0.0
+        if resume_payload is not None:
+            model.load_state_dict(resume_payload["model_state_dict"])
+            optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
+            _move_optimizer_state(optimizer, device)
+            early_state = resume_payload["early_stopping"]
+            early_stopping.counter = int(early_state["counter"])
+            early_stopping.early_stop = bool(early_state["early_stop"])
+            early_stopping.best_score = float(early_state["best_score"])
+            early_stopping.best_epoch = int(early_state["best_epoch"])
+            early_stopping.best_model_state = early_state["best_model_state"]
+            histories = resume_payload["training"]
+            train_loss_history = list(histories["train_loss_per_flow"])
+            validation_loss_history = list(histories["validation_loss_per_flow"])
+            validation_ap_history = list(histories["validation_average_precision"])
+            gradient_norm_history = list(histories["gradient_norm_max"])
+            train_temporal_history = list(histories["train_temporal_diagnostics"])
+            validation_temporal_history = list(
+                histories["validation_temporal_diagnostics"]
+            )
+            timing_state = resume_payload["timing"]
+            train_seconds = float(timing_state["training_seconds"])
+            validation_seconds = float(timing_state["epoch_validation_seconds"])
+            threshold_seconds = float(timing_state["threshold_selection_seconds"])
+            elapsed_before_session = float(timing_state["total_seconds"])
+            start_epoch = int(resume_payload["next_epoch"])
+            if len(train_loss_history) != start_epoch:
+                raise ValueError("Resume history length does not match next_epoch.")
+            _restore_rng_state(resume_payload["rng_state"])
+
+        last_durable_sync = time.perf_counter()
+        durable_path = (
+            Path(durable_resume_state_path)
+            if durable_resume_state_path is not None
+            else None
+        )
+        durable_exists = durable_path.is_file() if durable_path is not None else False
+        epoch_range = () if early_stopping.early_stop else range(start_epoch, epochs)
+        for epoch in epoch_range:
             epoch_started = time.perf_counter()
             tick = time.perf_counter()
             train_result = train_epoch(
@@ -742,9 +927,67 @@ def run_multiple_seeds(
                     f"| val loss/flow={validation_loss:.6f} "
                     f"| val AP={validation_ap:.6f} "
                     f"| epoch={time.perf_counter() - epoch_started:.1f}s "
-                    f"| elapsed={time.perf_counter() - started:.1f}s",
+                    f"| elapsed={elapsed_before_session + time.perf_counter() - started:.1f}s",
                     flush=True,
                 )
+
+            local_due = (
+                resume_state_path is not None
+                and ((epoch + 1) % resume_local_every_epochs == 0 or early_stopping.early_stop)
+            )
+            durable_due = (
+                durable_path is not None
+                and (
+                    (not durable_exists and epoch + 1 >= resume_local_every_epochs)
+                    or time.perf_counter() - last_durable_sync >= resume_sync_seconds
+                    or early_stopping.early_stop
+                )
+            )
+            if local_due or durable_due:
+                resume_state = {
+                    "format_version": 1,
+                    "artifact_type": "epoch_boundary_training_resume",
+                    "contract": expected_resume_contract,
+                    "run_id": run_id,
+                    "run_timestamp": run_timestamp,
+                    "resume_count": run_config["extra_params"]["resume_count"],
+                    "next_epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "early_stopping": {
+                        "counter": early_stopping.counter,
+                        "early_stop": early_stopping.early_stop,
+                        "best_score": early_stopping.best_score,
+                        "best_epoch": early_stopping.best_epoch,
+                        "best_model_state": early_stopping.best_model_state,
+                    },
+                    "training": {
+                        "train_loss_per_flow": train_loss_history,
+                        "validation_loss_per_flow": validation_loss_history,
+                        "validation_average_precision": validation_ap_history,
+                        "gradient_norm_max": gradient_norm_history,
+                        "train_temporal_diagnostics": train_temporal_history,
+                        "validation_temporal_diagnostics": validation_temporal_history,
+                    },
+                    "timing": {
+                        "total_seconds": elapsed_before_session + time.perf_counter() - started,
+                        "training_seconds": train_seconds,
+                        "epoch_validation_seconds": validation_seconds,
+                        "threshold_selection_seconds": threshold_seconds,
+                    },
+                    "rng_state": _capture_rng_state(include_cuda=uses_cuda),
+                }
+                if local_due:
+                    _atomic_torch_save(resume_state, resume_state_path)
+                if durable_due:
+                    _atomic_torch_save(resume_state, durable_path)
+                    durable_exists = True
+                    last_durable_sync = time.perf_counter()
+                    print(
+                        f"Durable resume state synchronized after epoch {epoch + 1}: "
+                        f"{durable_path}",
+                        flush=True,
+                    )
             if early_stopping.early_stop:
                 print(f"Early stopping after epoch {epoch + 1}.", flush=True)
                 break
@@ -773,7 +1016,7 @@ def run_multiple_seeds(
         final_metrics = calculate_metrics_gnn(
             y_true_best, y_probs_best, prob_threshold=best_threshold
         )
-        run_total_seconds = time.perf_counter() - started
+        run_total_seconds = elapsed_before_session + time.perf_counter() - started
         final_metrics.update({
             "optimal_threshold": best_threshold,
             "threshold_strategy": threshold_config["strategy"],
@@ -785,6 +1028,8 @@ def run_multiple_seeds(
             "seed": seed,
             "run_ts": run_timestamp,
             "run_id": run_id,
+            "resume_count": run_config["extra_params"]["resume_count"],
+            "resumed_from_epoch": run_config["extra_params"]["resumed_from_epoch"],
             "time_total_sec": run_total_seconds,
             "time_train_sec": train_seconds,
             "time_eval_sec": validation_seconds,

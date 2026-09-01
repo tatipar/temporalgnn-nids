@@ -151,6 +151,7 @@ class StaticGNNFactorialConfigurationTests(unittest.TestCase):
             hidden_dims=DEFAULT_HIDDEN_DIMS,
             device="cpu",
             num_workers=2,
+            graph_reads="checksum-verified local Colab cache",
         )
 
         self.assertEqual(plan["grid"]["configuration_count"], 20)
@@ -162,6 +163,12 @@ class StaticGNNFactorialConfigurationTests(unittest.TestCase):
         self.assertFalse(plan["selection_policy"]["test_splits_accessed"])
         self.assertEqual(plan["execution"]["device"], "cpu")
         self.assertIn("tenth epoch", plan["execution"]["progress_output"])
+        self.assertEqual(plan["execution"]["local_resume_every_epochs"], 10)
+        self.assertEqual(plan["execution"]["durable_resume_sync_minutes"], 60.0)
+        self.assertEqual(
+            plan["execution"]["graph_reads"],
+            "checksum-verified local Colab cache",
+        )
         self.assertEqual(plan["fixed_parameters"]["node_dim"], 16)
         self.assertEqual(plan["fixed_parameters"]["maximum_epochs"], 100)
 

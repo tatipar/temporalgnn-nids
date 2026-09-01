@@ -190,11 +190,25 @@ censoring a configuration that is still improving at the historical limit;
 every configuration receives the same ceiling.
 Its 20 configurations are the exact Cartesian product of five weight/bias
 pairs, learning rates `[0.001, 0.005]`, and hidden dimensions `[32, 64]`.
+The notebook first checks local free space while retaining a 10-GiB reserve,
+then stages only the `nfv3_extended` train and validation graph files under
+`/content`. It verifies every local graph against `artifact_checksums.json` and
+requires the local and Drive graph-manifest hashes to match. Training graph
+reads therefore remain local; calibration inputs and durable results remain in
+Drive.
+
 The CLI first writes `staticgnn_factorial/factorial_plan.json`; a differing
 rerun is rejected. Each configuration has its own run record, checkpoint,
 history, plots, completion record, and timings, so a normal restart skips
-verified completions. An interrupted configuration restarts from epoch one;
-completed configurations are never deleted or overwritten during recovery.
+verified completions. During an active configuration, the full epoch-boundary
+state includes the current and best model states, optimizer, early-stopping
+state, histories, timings, and random-number-generator states. It is replaced
+locally every ten epochs. A single durable Drive file is first written at epoch
+10 or after one hour, whichever happens first, then replaced at most hourly and
+at early stopping. A restart selects the
+newest compatible local or durable epoch and refuses a changed configuration,
+graph manifest, seed, epoch ceiling, experiment identity, or code revision.
+Completed configurations are never deleted or overwritten during recovery.
 
 The subprocess is unbuffered. It prints the complete configuration before
 training, every new best validation-AP epoch with `*`, every tenth epoch, early

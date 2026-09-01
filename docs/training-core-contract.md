@@ -124,6 +124,16 @@ embedded in the PyTorch checkpoint. The CSV is a compact index, not the
 authoritative run record. New checkpoints contain `model_state_dict`; the
 shared loader can still read historical raw state dictionaries.
 
+Long screening runs may additionally use an epoch-boundary resume artifact.
+It contains the current model, optimizer, best validation-AP model,
+early-stopping state, histories, timing accumulators, and random-number-
+generator states. Loading is allowed only when the configuration hash, graph
+manifest, feature profile, seed, epoch ceiling, experiment identity, and code
+revision match. This temporary recovery artifact is distinct from the final,
+self-describing checkpoint and cannot be treated as a completed experiment.
+The final run record discloses the resume count and the epoch boundary loaded
+by its last process invocation.
+
 ## Verification
 
 Run the complete suite from the repository root:

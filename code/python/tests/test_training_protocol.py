@@ -23,12 +23,69 @@ from utils.experiment import (  # noqa: E402
 from utils.metrics import calculate_metrics_gnn  # noqa: E402
 from utils.training import (  # noqa: E402
     SELECTION_METRIC,
+    _atomic_torch_save,
+    _load_latest_resume_state,
+    _resume_contract,
     _validate_model_config,
     make_flow_criterion,
     select_optimal_threshold,
     train_epoch,
     validate_temporal_configuration,
 )
+
+
+class ResumeStateContractTests(unittest.TestCase):
+    def setUp(self):
+        self.model_config = {
+            "model_params": {"edge_dim": 40},
+            "data_params": {"feature_profile": "nfv3_extended"},
+            "extra_params": {"learning_rate": 0.005},
+        }
+        self.metadata = {
+            "graph_manifest_sha256": "a" * 64,
+            "feature_profile": "nfv3_extended",
+        }
+        self.contract = _resume_contract(
+            model_config=self.model_config,
+            seed=42,
+            epochs=100,
+            experiment_name="factorial-cell",
+            code_version="b" * 40,
+            train_metadata=self.metadata,
+        )
+
+    def payload(self, next_epoch):
+        return {
+            "format_version": 1,
+            "artifact_type": "epoch_boundary_training_resume",
+            "contract": self.contract,
+            "next_epoch": next_epoch,
+        }
+
+    def test_latest_compatible_epoch_is_selected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            local_path = root / "local.pth"
+            durable_path = root / "durable.pth"
+            _atomic_torch_save(self.payload(20), local_path)
+            _atomic_torch_save(self.payload(10), durable_path)
+
+            selected = _load_latest_resume_state(
+                (local_path, durable_path), self.contract
+            )
+
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected[0], local_path)
+            self.assertEqual(selected[1]["next_epoch"], 20)
+
+    def test_changed_contract_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "resume.pth"
+            _atomic_torch_save(self.payload(10), path)
+            changed = dict(self.contract, maximum_epochs=60)
+
+            with self.assertRaisesRegex(ValueError, "frozen run contract"):
+                _load_latest_resume_state((path,), changed)
 
 
 class TinyGraph:
