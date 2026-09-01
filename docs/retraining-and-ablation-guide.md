@@ -128,17 +128,20 @@ calibration manifest has SHA-256
 An immediate rerun returned `status="unchanged"` with the same hash, satisfying
 the deterministic-regeneration criterion. Phase 4B is the next task.
 
-### Phase 4B — validation-only calibration screening: implementation ready
+### Phase 4B — validation-only calibration and optimizer screening
 
 After Phase 4A, use development seed `42` and `nfv3_extended`:
 
-1. train SimpleMLP once for every frozen weight/bias pair;
-2. select checkpoints by validation AP and select thresholds on validation;
-3. never judge a candidate using a fixed `0.5` threshold alone;
-4. shortlist the best candidates and check them with full ST-GNN;
-5. prefer the smaller weight when validation AP differences are practically
-   negligible;
-6. freeze the selected calibration before any confirmatory or test run.
+1. retain the completed five-candidate SimpleMLP screen as preliminary evidence;
+2. use StaticGNN, rather than the proposed ST-GNN, as the reference architecture
+   for final training-recipe selection;
+3. cross all five frozen weight/bias pairs with learning rates `1e-3` and
+   `5e-3` and hidden dimensions 32 and 64;
+4. select checkpoints by validation AP and thresholds by validation `max_f1`;
+5. rank all 20 seed-42 configurations and advance the best two complete
+   configurations to multi-seed confirmation;
+6. freeze the selected weight/bias, learning rate, and hidden dimension before
+   any confirmatory model comparison or test run.
 
 These runs are technical screening, not reportable model comparisons. Test1
 and Test2 remain untouched.
@@ -149,6 +152,12 @@ The reproducible implementation uses:
   frozen configurations, plans, completion records, and summaries;
 - `code/python/scripts/screen_calibration.py` for resumable candidate runs;
 - `code/python/tests/test_calibration_screening.py` for protocol enforcement;
+- `code/python/utils/staticgnn_factorial.py` for the pure 20-cell grid, plan,
+  result, timing, and ranking contracts;
+- `code/python/scripts/screen_staticgnn_factorial.py` for resumable StaticGNN
+  execution and live progress;
+- `code/python/tests/test_staticgnn_factorial.py` for factorial and resume
+  coverage;
 - `code/python/notebook/screen_training_calibration.ipynb` as the thin Colab
   orchestrator.
 
@@ -163,13 +172,41 @@ inside that margin. Each completed candidate has an independently hashed run
 record and checkpoint, so an interrupted Colab session skips verified completed
 runs on restart.
 
-Run the MLP stage first and preserve its complete `screening_summary.json`.
-The notebook first runs the CLI with `--plan-only` so the exact plan can be
-inspected before the separate long-running training cell starts or resumes it.
-Do not enable the ST-GNN cell until the complete MLP ranking and the resulting
-predeclared-margin shortlist have been reviewed. The ST-GNN CLI requires that
-shortlist explicitly and freezes the full current-identity exponential-decay
-configuration.
+The completed MLP run at revision `39401c9` used learning rate `1e-3`; its
+artifact was committed as preliminary evidence in `d70cc7c`. Its AP curves
+were sufficiently variable that they must not alone freeze the class weight,
+and the historical notebooks used learning rate `5e-3`. The StaticGNN
+factorial resolves both the learning-rate ambiguity and the input-width change
+from 32 historical edge features to 40 `nfv3_extended` features without tuning
+the proposed ST-GNN preferentially.
+
+The factorial uses seed 42, CPU, node projection dimension 16, at most 100
+epochs, dropout 0.2, 10 graph windows per optimization step, patience 10, and
+minimum AP improvement `1e-4`. The node projection retains the historical
+StaticGNN/ST-GNN value. It does not need to scale proportionally with the edge
+schema because the raw edge attributes also remain available to GATv2 and the
+edge classifier. Raising only the early-stopped maximum from 60 to 100 avoids
+censoring a configuration that is still improving at the historical limit;
+every configuration receives the same ceiling.
+Its 20 configurations are the exact Cartesian product of five weight/bias
+pairs, learning rates `[0.001, 0.005]`, and hidden dimensions `[32, 64]`.
+The CLI first writes `staticgnn_factorial/factorial_plan.json`; a differing
+rerun is rejected. Each configuration has its own run record, checkpoint,
+history, plots, completion record, and timings, so a normal restart skips
+verified completions. An interrupted configuration restarts from epoch one;
+completed configurations are never deleted or overwritten during recovery.
+
+The subprocess is unbuffered. It prints the complete configuration before
+training, every new best validation-AP epoch with `*`, every tenth epoch, early
+stopping, the validation-only threshold and method, final validation metrics,
+training, repeated epoch-validation, final restored-checkpoint validation,
+threshold-selection and total compute time, artifact paths, overall progress,
+and an ETA. Compute timing excludes plot and artifact serialization.
+This frequency is negligible compared with graph training; per-window or
+per-batch printing remains prohibited. After all 20 runs, the CLI writes and
+prints `factorial_summary.json` with the full ranking, cumulative timings, and
+the two seed-42 finalists. Do not run ST-GNN or access a test split before the
+factorial and its planned finalist confirmation have been reviewed.
 
 ### Phase 5 — model screening and confirmatory runs
 
@@ -688,8 +725,9 @@ discard non-viable configurations. These results are not scientific comparisons.
 
 Order:
 
-1. MLP on `nfv3_extended`.
-2. All five base models on `nfv3_extended`.
+1. Complete and confirm the StaticGNN Phase-4B training-recipe factorial on
+   `nfv3_extended`.
+2. All five base models on `nfv3_extended` using the frozen recipe.
 3. ST-GNN plus structural controls on `nfv3_extended`.
 4. All five base models on `portable_core`.
 
@@ -741,7 +779,8 @@ necessary final matrix.
 2. Run graph construction on a small sample; pass all temporal-contract tests.
 3. Generate complete graphs, scaler, edge provenance, and graph manifest.
 4. Run an MLP smoke test for dimensions, timing, and splits.
-5. Calibrate `pos_weight` and bias on train/validation only.
+5. Calibrate the weight/bias, learning rate, and hidden dimension on
+   train/validation only using the frozen StaticGNN factorial.
 6. Run one-seed screening for models and ablations.
 7. Freeze JSON/YAML configuration, hashes, and the experiment list.
 8. Run five-seed confirmatory experiments.

@@ -128,7 +128,7 @@ Primary ST-GNN architecture and memory parameters:
 
 ```python
 "model_params": {
-    "node_dim": 32,
+    "node_dim": 16,
     "edge_dim": train_dataset.edge_dim,
     "hidden_dim": 64,
     "dropout": 0.2,

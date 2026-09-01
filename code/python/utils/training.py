@@ -662,7 +662,7 @@ def run_multiple_seeds(
             _safe_run_component(code_id),
             run_timestamp,
         ))
-        print(f"\nRunning seed {seed} | run_id={run_id}")
+        print(f"\nRunning seed {seed} | run_id={run_id}", flush=True)
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -707,6 +707,7 @@ def run_multiple_seeds(
         train_temporal_history = []
         validation_temporal_history = []
         for epoch in range(epochs):
+            epoch_started = time.perf_counter()
             tick = time.perf_counter()
             train_result = train_epoch(
                 model,
@@ -734,21 +735,28 @@ def run_multiple_seeds(
             validation_temporal_history.append(temporal_diagnostics(model))
             improved = early_stopping(validation_ap, model, epoch)
             if improved or (epoch + 1) % 10 == 0:
-                marker = " (*)" if improved else ""
+                marker = " (*)" if improved else " "
                 print(
-                    f"Epoch {epoch + 1} | train loss/flow={train_result.loss_per_flow:.6f} "
-                    f"| val loss/flow={validation_loss:.6f} | val AP={validation_ap:.6f}{marker}"
+                    f"{marker} Epoch {epoch + 1:03d}/{epochs:03d} "
+                    f"| train loss/flow={train_result.loss_per_flow:.6f} "
+                    f"| val loss/flow={validation_loss:.6f} "
+                    f"| val AP={validation_ap:.6f} "
+                    f"| epoch={time.perf_counter() - epoch_started:.1f}s "
+                    f"| elapsed={time.perf_counter() - started:.1f}s",
+                    flush=True,
                 )
             if early_stopping.early_stop:
-                print(f"Early stopping after epoch {epoch + 1}.")
+                print(f"Early stopping after epoch {epoch + 1}.", flush=True)
                 break
 
         if early_stopping.best_model_state is None:
             raise RuntimeError("Early stopping did not capture a valid checkpoint.")
         model.load_state_dict(early_stopping.best_model_state)
+        tick = time.perf_counter()
         _, y_true_best, y_probs_best = evaluate(
             model, val_loader, criterion, device, temporal=run_config["temporal"]
         )
+        final_validation_seconds = time.perf_counter() - tick
         final_temporal_diagnostics = temporal_diagnostics(model)
 
         threshold_config = run_config["threshold"]
@@ -765,6 +773,7 @@ def run_multiple_seeds(
         final_metrics = calculate_metrics_gnn(
             y_true_best, y_probs_best, prob_threshold=best_threshold
         )
+        run_total_seconds = time.perf_counter() - started
         final_metrics.update({
             "optimal_threshold": best_threshold,
             "threshold_strategy": threshold_config["strategy"],
@@ -776,9 +785,10 @@ def run_multiple_seeds(
             "seed": seed,
             "run_ts": run_timestamp,
             "run_id": run_id,
-            "time_total_sec": time.perf_counter() - started,
+            "time_total_sec": run_total_seconds,
             "time_train_sec": train_seconds,
             "time_eval_sec": validation_seconds,
+            "time_final_eval_sec": final_validation_seconds,
             "time_threshold_sec": threshold_seconds,
             "final_temporal_diagnostics": final_temporal_diagnostics,
         })
@@ -796,7 +806,31 @@ def run_multiple_seeds(
             run_timestamp,
             save_dir=os.path.join(plots_dir, experiment_name),
         )
-        manager.log_experiment(
+        print(
+            f"Optimal threshold: {best_threshold:.6f} "
+            f"({threshold_description}; validation only)",
+            flush=True,
+        )
+        print(
+            "Final validation metrics "
+            f"| AP={final_metrics['AUC-PR']:.6f} "
+            f"| precision={final_metrics['Precision']:.6f} "
+            f"| recall={final_metrics['Recall']:.6f} "
+            f"| F1={final_metrics['F1']:.6f} "
+            f"| F2={final_metrics['F2']:.6f} "
+            f"| FPR={final_metrics['FPR']:.6f}",
+            flush=True,
+        )
+        print(
+            "Timing "
+            f"| total={run_total_seconds:.1f}s "
+            f"| train={train_seconds:.1f}s "
+            f"| epoch validation={validation_seconds:.1f}s "
+            f"| final validation={final_validation_seconds:.3f}s "
+            f"| threshold={threshold_seconds:.3f}s",
+            flush=True,
+        )
+        saved_artifacts = manager.log_experiment(
             model_config=run_config,
             metrics=final_metrics,
             model_object=model,
@@ -820,23 +854,53 @@ def run_multiple_seeds(
                 "best_score": float(early_stopping.best_score),
                 "stopped_epoch": len(train_loss_history),
             },
+            "timing": {
+                "total_seconds": run_total_seconds,
+                "training_seconds": train_seconds,
+                "epoch_validation_seconds": validation_seconds,
+                "final_validation_seconds": final_validation_seconds,
+                "threshold_selection_seconds": threshold_seconds,
+            },
+            "artifacts": saved_artifacts,
             "final_validation_temporal_diagnostics": final_temporal_diagnostics,
         }
         history_path = os.path.join(output_dir, f"training_history_{run_id}.json")
         with open(history_path, "w", encoding="utf-8") as handle:
             json.dump(history_payload, handle, cls=NumpyEncoder, indent=2)
-        print(f"Training history saved: {history_path}")
+        print(f"Training history saved: {history_path}", flush=True)
 
     threshold_path = os.path.join(output_dir, f"thresholds_{experiment_name}.npz")
     np.savez(threshold_path, **all_thresholds)
-    print(f"\nThresholds saved: {threshold_path}")
+    print(f"\nThresholds saved: {threshold_path}", flush=True)
 
     frame = pd.read_csv(manager.log_file)
     selected = frame[frame["model_name"].astype(str).str.contains(experiment_name, regex=False)]
     if selected.empty:
         return
+    if "seed" in selected.columns:
+        selected = selected.drop_duplicates(subset="seed", keep="last")
+
+    def mean_and_std(column):
+        values = selected[column].astype(float)
+        standard_deviation = values.std(ddof=1) if len(values) > 1 else 0.0
+        return values.mean(), standard_deviation
+
+    ap_mean, ap_std = mean_and_std("AUC-PR")
+    recall_mean, recall_std = mean_and_std("Recall")
+    total_mean, total_std = mean_and_std("time_total_sec")
+    train_mean, train_std = mean_and_std("time_train_sec")
+    validation_mean, validation_std = mean_and_std("time_eval_sec")
+    final_validation_mean, final_validation_std = mean_and_std("time_final_eval_sec")
     print("=" * 60)
     print(f"VALIDATION SUMMARY: {experiment_name}")
-    print(f"AP: {selected['AUC-PR'].mean():.6f} ± {selected['AUC-PR'].std():.6f}")
-    print(f"Recall: {selected['Recall'].mean():.6f} ± {selected['Recall'].std():.6f}")
+    print(f"AP: {ap_mean:.6f} ± {ap_std:.6f}")
+    print(f"Recall: {recall_mean:.6f} ± {recall_std:.6f}")
+    print(f"Total time: {total_mean:.1f}s ± {total_std:.1f}s")
+    print(f"Training time: {train_mean:.1f}s ± {train_std:.1f}s")
+    print(f"Epoch-validation time: {validation_mean:.1f}s ± {validation_std:.1f}s")
+    print(
+        "Final-validation time: "
+        f"{final_validation_mean:.3f}s ± {final_validation_std:.3f}s"
+    )
+    print(f"Metrics log: {manager.log_file}")
     print("=" * 60)

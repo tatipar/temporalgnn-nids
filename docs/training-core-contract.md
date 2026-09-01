@@ -100,6 +100,11 @@ model_config = {
 }
 ```
 
+The numeric values above illustrate a complete valid configuration; they are
+not evidence that learning rate `1e-3`, `pos_weight=1`, or hidden dimension 64
+is optimal. Phase 4B freezes those values through a validation-only StaticGNN
+factorial before the common training recipe is used for model comparisons.
+
 The runner validates the train/validation manifests and augments each run with:
 
 - graph-manifest and corrected-data-manifest SHA-256 values;
