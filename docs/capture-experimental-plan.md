@@ -9,7 +9,7 @@ update this document whenever a decision changes rather than relying on chat
 history.
 
 The immediate objective is not to demonstrate that a temporal GNN is better.
-It is to test, without data leakage, whether temporal or structural context
+It is to test, without data leakage, whether temporal and/or structural context
 provides useful and earlier attack-chain detection than current-packet
 features alone.
 
@@ -21,6 +21,16 @@ Status as of 2026-09-16:
 - the first implementation will use fixed, non-overlapping graph windows;
 - the exact packet schema and window duration remain open pending Gate 0;
 - no cAPTure classifier has been trained yet.
+
+Implementation update (2026-09-17): the initial machine-readable manifest is
+available at [capture_experiment_v1.yaml](../configs/capture_experiment_v1.yaml).
+It records the locked assignments and explicit unresolved decisions (`null`).
+Initial Gate-0 window candidates are 1, 5, 10, and 30 seconds, with seed 42 as
+the initial reproducibility seed. Neither the selected duration nor its
+selection rule is frozen. Packet CSV IDs and published filenames still require
+source-metadata verification; the existing audit's IDs identify merge notebooks,
+not packet CSVs. Readiness requirements are declarative until runners implement
+their checks. The planned data audit notebook is named `capture_data_gate0.ipynb`.
 
 ## Why cAPTure is being evaluated
 
@@ -39,7 +49,7 @@ points.
 
 The main research question is:
 
-> Does temporal or graph-structural context improve packet detection,
+> Does temporal and/or graph-structural context improve packet detection,
 > attack-step coverage, or detection latency over a strong packet-only
 > classifier under unseen benign conditions and unseen attack paths?
 
@@ -443,7 +453,7 @@ This manifest must exist before model training.
 
 ### Phase 1: Gate-0 smoke audit
 
-Create `capture_data_gate0_colab.ipynb` with a smoke mode that processes one
+Create `capture_data_gate0.ipynb` with a smoke mode that processes one
 non-held-out scenario from each author-train benign background:
 
 - `empty_conn` from `normal_2_3_4`;
@@ -645,7 +655,7 @@ Every run must record:
 The next implementation work should produce, in this order:
 
 1. a machine-readable cAPTure experiment manifest;
-2. `capture_data_gate0_colab.ipynb` with `SMOKE` and `FULL_DEV` modes;
+2. `capture_data_gate0.ipynb` with `SMOKE` and `FULL_DEV` modes;
 3. canonical per-scenario Parquet and audit-report schemas;
 4. an XGB-P training and out-of-fold evaluation notebook or script;
 5. XGB-P+T feature generation only after XGB-P passes its sanity gate;

@@ -1,0 +1,329 @@
+# cAPTure feasibility study: declared experimental configuration.
+# null means unresolved, never an implicit default or permission to proceed.
+# Paths are relative to the repository root. Runtime reports are separate artifacts.
+manifest_version: 1
+experiment_id: capture_feasibility_v1
+status: draft_pending_gate0
+decision_record: docs/capture-experimental-plan.md
+dataset: cAPTure
+objective: >-
+  Evaluate whether temporal and/or graph-structural context improves packet
+  detection, attack-step coverage, or latency over current-packet features.
+
+sources:
+  policy: immutable_author_premerged_scenarios
+  regenerate_mixes: false
+  provenance_evidence: code/python/notebook/capture_benign_source_audit_colab.ipynb
+  provenance_scope: author_merge_code_declarations_not_csv_content_verification
+  # CSV IDs and published names must be verified before downloading each file.
+  # Merge-notebook IDs must never be substituted for packet CSV IDs.
+  csv_catalog_status: pending_source_metadata_verification
+  inspect_held_out_author_train_contents: false
+  access_final_contents_before_pipeline_freeze: false
+
+scenarios:
+  train_empty_conn:
+    attack_chain: empty_conn
+    author_split: train
+    benign_source: normal_2_3_4
+    assignment: development
+    source_file_id: null
+    expected_filename: null
+  train_qos_mid:
+    attack_chain: qos_mid
+    author_split: train
+    benign_source: normal_2_3_4
+    assignment: development
+    source_file_id: null
+    expected_filename: null
+  train_dollar_char:
+    attack_chain: dollar_char
+    author_split: train
+    benign_source: normal_15_16_17
+    assignment: development
+    source_file_id: null
+    expected_filename: null
+  train_slash_char:
+    attack_chain: slash_char
+    author_split: train
+    benign_source: normal_15_16_17
+    assignment: development
+    source_file_id: null
+    expected_filename: null
+  train_sub_exf:
+    attack_chain: sub_exf
+    author_split: train
+    benign_source: normal_15_16_17
+    assignment: development
+    source_file_id: null
+    expected_filename: null
+  train_pub_exf:
+    attack_chain: pub_exf
+    author_split: train
+    benign_source: normal_2_3_4
+    assignment: prohibited
+    source_file_id: null
+    expected_filename: null
+  train_user_prop:
+    attack_chain: user_prop
+    author_split: train
+    benign_source: normal_15_16_17
+    assignment: prohibited
+    source_file_id: null
+    expected_filename: null
+  test_empty_conn:
+    attack_chain: empty_conn
+    author_split: test
+    benign_source: normal_5_6_7
+    assignment: test1
+    source_file_id: null
+    expected_filename: null
+  test_qos_mid:
+    attack_chain: qos_mid
+    author_split: test
+    benign_source: normal_5_6_7
+    assignment: test1
+    source_file_id: null
+    expected_filename: null
+  test_dollar_char:
+    attack_chain: dollar_char
+    author_split: test
+    benign_source: normal_5_6_7
+    assignment: test1
+    source_file_id: null
+    expected_filename: null
+  test_slash_char:
+    attack_chain: slash_char
+    author_split: test
+    benign_source: normal_5_6_7
+    assignment: test1
+    source_file_id: null
+    expected_filename: null
+  test_sub_exf:
+    attack_chain: sub_exf
+    author_split: test
+    benign_source: normal_5_6_7
+    assignment: test1
+    source_file_id: null
+    expected_filename: null
+  test_pub_exf:
+    attack_chain: pub_exf
+    author_split: test
+    benign_source: normal_5_6_7
+    assignment: test2
+    source_file_id: null
+    expected_filename: null
+  test_user_prop:
+    attack_chain: user_prop
+    author_split: test
+    benign_source: normal_5_6_7
+    assignment: test2
+    source_file_id: null
+    expected_filename: null
+
+validation:
+  strategy: leave_one_benign_block_out
+  folds:
+    A:
+      train: [train_empty_conn, train_qos_mid]
+      validate: [train_dollar_char, train_slash_char, train_sub_exf]
+    B:
+      train: [train_dollar_char, train_slash_char, train_sub_exf]
+      validate: [train_empty_conn, train_qos_mid]
+  oof_scores_per_development_packet: 1
+  comparison_aggregation: macro_across_chains_and_folds
+  final_refit_pool: all_development_scenarios
+  test1_test2_same_frozen_pipeline: true
+  tune_between_final_tests: false
+  final_tests_have_independent_benign_backgrounds: false
+
+gate0:
+  notebook: code/python/notebook/capture_data_gate0.ipynb
+  modes:
+    SMOKE: [train_empty_conn, train_dollar_char]
+    FULL_DEV: [train_empty_conn, train_qos_mid, train_dollar_char, train_slash_char, train_sub_exf]
+  smoke_is_scientific_evidence: false
+  full_dev_requires_smoke_pass: true
+  required_diagnostics:
+    - schema_and_dtypes
+    - label_values_and_binary_mapping
+    - timestamp_parsing_ordering_and_ranges
+    - attack_steps_phases_and_sequence_reconstruction
+    - normal_and_attack_packet_counts
+    - missing_constant_malformed_and_duplicate_columns_or_rows
+    - endpoints_and_communication_pairs
+    - packet_rates_and_graph_sizes_at_candidate_widths
+    - attack_step_durations
+    - raw_and_derived_storage_estimates
+
+prepared_data:
+  layout: compressed_parquet_per_scenario
+  process_one_raw_scenario_at_a_time: true
+  commit_raw_or_derived_datasets: false
+  schema_version: null
+  required_columns:
+    - packet_id
+    - scenario
+    - attack_chain
+    - benign_source
+    - author_split
+    - packet_timestamp
+    - window_id
+    - window_start
+    - window_end
+    - src_endpoint
+    - dst_endpoint
+    - binary_label
+    - attack_step
+    - phase
+    - sequence_id
+  packet_id_policy: stable_source_file_and_original_row_identity
+  packet_feature_columns: null
+  raw_to_canonical_column_mapping: null
+  timestamp_parsing_and_units: null
+  duplicate_row_handling: null
+
+labels:
+  prediction_unit: packet
+  task: binary_classification
+  normal_target: 0
+  any_labeled_attack_step_target: 1
+  raw_label_mapping: null
+  unknown_or_missing_label_policy: null
+  sequence_iteration_key: null
+
+features:
+  policy_version: capture_identity_free_v1
+  base_family: technically_valid_current_packet_features
+  shared_base_features_across_models: true
+  forbidden_input_roles:
+    - labels_and_attack_annotations
+    - attack_step_and_phase_names
+    - sequence_identifiers
+    - scenario_and_chain_identifiers
+    - benign_source_and_split_identifiers
+    - packet_and_source_row_identifiers
+    - window_identifiers
+    - absolute_timestamps
+    - raw_ip_mac_or_other_endpoint_identities
+  endpoint_identifiers_for_topology_only: true
+  author_top100_features_allowed_in_primary_experiment: false
+  initial_selection: all_valid_features_if_computationally_manageable
+  fitted_preprocessing_scope: current_fold_training_scenarios_only
+  final_preprocessing_refit_scope: all_development_scenarios
+  selected_columns: null
+  categorical_encoding: null
+  missing_value_handling: null
+  scaling: null
+  learned_feature_selection_procedure: null
+
+windows:
+  type: fixed_non_overlapping
+  interval: left_closed_right_open
+  boundary_scope: scenario
+  cross_scenario_or_split_boundaries: false
+  target_windows_per_packet: 1
+  # Initial engineering candidates; selected width still requires development evidence.
+  candidate_durations_seconds: [1, 5, 10, 30]
+  selected_duration_seconds: null
+  origin_rule: null
+  selection_data: development_only
+  selection_rule: null
+  decision_time: window_end
+  empty_window_policy: null
+  sensitivity_origin_shift_fraction: 0.5
+
+graphs:
+  type: directed_temporal_multigraph
+  node_unit: stable_endpoint
+  edge_unit: packet
+  preserve_parallel_packet_edges: true
+  edge_features: approved_current_packet_features
+  edge_target: binary_label
+  timestamp: window_end
+  node_ids_stable_within_scenario: true
+  packet_edge_score_correspondence: one_to_one
+  endpoint_key: null
+  broadcast_multicast_policy: null
+  missing_endpoint_policy: null
+  non_ip_packet_policy: null
+  schema_version: null
+
+training:
+  # Initial reproducibility seed; this does not constitute a multi-seed study.
+  seeds: [42]
+  model_order: [xgb_p, xgb_p_t, edge_mlp, static_gnn, edge_gru, st_gnn]
+  xgb_model_scope: one_global_model_per_fold
+  temporal_graph_order: chronological_within_scenario
+  temporal_graph_shuffle: false
+  temporal_batch_size_graphs: 1
+  reset_state_at:
+    - scenario_boundary
+    - training_epoch_start
+    - validation_or_test_pass_start
+    - fold_boundary
+  memory_policy: null
+  temporal_summary_features_and_horizons: null
+  hyperparameter_search: null
+  class_weighting_or_training_only_sampling: null
+  checkpoint_selection_rule: null
+
+evaluation:
+  primary_decision_time: window_end
+  optional_xgb_p_native_decision_time: packet_timestamp
+  required_metrics:
+    - packet_pr_auc
+    - packet_recall_at_declared_thresholds
+    - packet_precision_at_declared_thresholds
+    - packet_false_positive_rate
+    - false_alert_windows_per_hour
+    - sequence_detection_rate
+    - latency_per_attack_step_iteration
+  required_breakdowns: [fold, chain, attack_step]
+  primary_aggregation: macro_across_chains_and_folds
+  packet_micro_only_conclusion_allowed: false
+  sequence_latency: first_detecting_window_end_minus_first_malicious_packet_timestamp
+  retain_missed_sequences_explicitly: true
+  threshold_selection_data: development_out_of_fold_predictions_only
+  threshold_selection_procedure: null
+  false_alert_budgets: null
+  window_alert_aggregation_rule: null
+  false_alert_exposure_definition: null
+  minimum_effect_sizes_for_model_gates: null
+  required_xgb_p_sanity_checks:
+    - shuffled_labels
+    - single_feature_diagnostics
+    - feature_importance
+    - endpoint_identity_exclusion
+    - fold_training_only_preprocessing
+    - per_fold_and_per_chain_results
+    - investigate_near_perfect_results
+
+readiness:
+  # Declarative requirements for future consumers; no runner enforces them yet.
+  gate0_passed: false
+  xgb_p_sanity_gate_passed: false
+  final_pipeline_frozen: false
+  requirements:
+    gate0: verify_source_id_and_filename_for_each_requested_development_scenario
+    xgb_p: resolve_data_labels_features_windows_search_sampling_and_checkpoint_policy
+    xgb_p_t: pass_xgb_p_sanity_gate_and_resolve_summary_features_and_horizons
+    graph_models: validate_tabular_baselines_and_resolve_graph_schema_and_memory_policy
+    final_test: freeze_all_primary_pipeline_and_evaluation_decisions_before_content_access
+
+run_provenance:
+  # Generated per run, stored outside this configuration.
+  required_records:
+    - git_commit_and_working_tree_status
+    - manifest_sha256
+    - source_ids_sizes_row_counts_and_hashes_when_feasible
+    - prepared_schema_and_artifact_hashes
+    - preprocessing_configuration_and_fitting_provenance
+    - scenario_and_fold_assignments
+    - feature_policy_and_ordered_columns
+    - window_width_origin_and_decision_time
+    - seeds_and_software_versions
+    - model_configuration_and_checkpoint_selection
+    - threshold_selection_provenance
+    - per_packet_predictions_with_packet_scenario_window_sequence_and_timestamp_keys
+    - per_chain_per_step_and_aggregate_metrics
