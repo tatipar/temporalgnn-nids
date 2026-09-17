@@ -3,7 +3,7 @@
 # Paths are relative to the repository root. Runtime reports are separate artifacts.
 manifest_version: 1
 experiment_id: capture_feasibility_v1
-status: draft_pending_gate0
+status: draft_gate0_preparation_pending
 decision_record: docs/capture-experimental-plan.md
 dataset: cAPTure
 objective: >-
@@ -17,7 +17,7 @@ sources:
   provenance_scope: author_merge_code_declarations_not_csv_content_verification
   # CSV IDs and published names must be verified before downloading each file.
   # Merge-notebook IDs must never be substituted for packet CSV IDs.
-  csv_catalog_status: development_metadata_verified_contents_pending_gate0
+  csv_catalog_status: development_contents_audited
   official_root_url: https://drive.google.com/drive/folders/1d6PkZLMF6Nu7bsmxhAjP4wWwuLUZ2E-2
   development_folder_url: https://drive.google.com/drive/folders/1f8koJbuPs0_CWoItWdt3VF-lZ_R6JAms
   development_folder_path: dataset_creation/raw_traffic/normal_attack/train
@@ -141,7 +141,7 @@ validation:
       train: [train_dollar_char, train_slash_char, train_sub_exf]
       validate: [train_empty_conn, train_qos_mid]
   oof_scores_per_development_packet: 1
-  comparison_aggregation: macro_across_chains_and_folds
+  comparison_aggregation: hierarchical_macro_scenarios_within_folds_then_folds
   final_refit_pool: all_development_scenarios
   test1_test2_same_frozen_pipeline: true
   tune_between_final_tests: false
@@ -170,7 +170,7 @@ prepared_data:
   layout: compressed_parquet_per_scenario
   process_one_raw_scenario_at_a_time: true
   commit_raw_or_derived_datasets: false
-  schema_version: null
+  schema_version: capture_packet_v1_candidate
   required_columns:
     - packet_id
     - scenario
@@ -188,10 +188,10 @@ prepared_data:
     - phase
     - sequence_id
   packet_id_policy: stable_source_file_and_original_row_identity
-  packet_feature_columns: null
-  raw_to_canonical_column_mapping: null
-  timestamp_parsing_and_units: null
-  duplicate_row_handling: null
+  packet_feature_columns: configs/capture_packet_schema_v1.yaml#features
+  raw_to_canonical_column_mapping: configs/capture_packet_schema_v1.yaml
+  timestamp_parsing_and_units: datetime_utc_and_integer_nanoseconds
+  duplicate_row_handling: reject_if_detected_during_gate0
 
 labels:
   prediction_unit: packet
@@ -221,11 +221,11 @@ features:
   initial_selection: all_valid_features_if_computationally_manageable
   fitted_preprocessing_scope: current_fold_training_scenarios_only
   final_preprocessing_refit_scope: all_development_scenarios
-  selected_columns: null
-  categorical_encoding: null
-  missing_value_handling: null
-  scaling: null
-  learned_feature_selection_procedure: null
+  selected_columns: configs/capture_packet_schema_v1.yaml#features
+  categorical_encoding: no_raw_categorical_features_in_capture_packet_v1
+  missing_value_handling: nullable_in_canonical_fit_imputation_and_masks_on_training_fold_only
+  scaling: model_specific_fit_on_training_fold_only
+  learned_feature_selection_procedure: none_for_primary_baseline
 
 windows:
   type: fixed_non_overlapping
@@ -233,14 +233,14 @@ windows:
   boundary_scope: scenario
   cross_scenario_or_split_boundaries: false
   target_windows_per_packet: 1
-  # Initial engineering candidates; selected width still requires development evidence.
+  # Gate-0 engineering candidates; five seconds is primary and the rest are ablations.
   candidate_durations_seconds: [1, 5, 10, 30]
-  selected_duration_seconds: null
-  origin_rule: null
+  selected_duration_seconds: 5
+  origin_rule: first_packet_timestamp_per_scenario
   selection_data: development_only
-  selection_rule: null
+  selection_rule: predeclared_engineering_compromise_before_model_results
   decision_time: window_end
-  empty_window_policy: null
+  empty_window_policy: do_not_materialize_preserve_index_gaps
   sensitivity_origin_shift_fraction: 0.5
 
 graphs:
@@ -253,11 +253,11 @@ graphs:
   timestamp: window_end
   node_ids_stable_within_scenario: true
   packet_edge_score_correspondence: one_to_one
-  endpoint_key: null
-  broadcast_multicast_policy: null
-  missing_endpoint_policy: null
-  non_ip_packet_policy: null
-  schema_version: null
+  endpoint_key: normalized_ethernet_mac_address
+  broadcast_multicast_policy: preserve_as_explicit_group_address_nodes
+  missing_endpoint_policy: error
+  non_ip_packet_policy: preserve_including_arp
+  schema_version: capture_ethernet_packet_multigraph_v1_candidate
 
 training:
   # Initial reproducibility seed; this does not constitute a multi-seed study.
@@ -275,13 +275,26 @@ training:
   memory_policy: null
   temporal_summary_features_and_horizons: null
   hyperparameter_search: null
-  class_weighting_or_training_only_sampling: null
+  class_weighting_or_training_only_sampling:
+    policy: inverse_scenario_class_frequency
+    fit_scope: current_training_fold_only
+    equal_total_weight_per_scenario_class_cell: true
+    normalization: mean_training_weight_one
+    xgb_application: sample_weight
+    neural_application: per_edge_loss_weight
+    validation_and_test_weighting: none
   checkpoint_selection_rule: null
 
 evaluation:
+  primary_selection_metric:
+    name: hierarchical_macro_oof_packet_roc_auc
+    per_scenario: unweighted_packet_roc_auc
+    within_fold: mean_across_validation_scenarios
+    across_folds: mean_across_the_two_fold_means
   primary_decision_time: window_end
   optional_xgb_p_native_decision_time: packet_timestamp
   required_metrics:
+    - packet_roc_auc
     - packet_pr_auc
     - packet_recall_at_declared_thresholds
     - packet_precision_at_declared_thresholds
@@ -290,7 +303,7 @@ evaluation:
     - sequence_detection_rate
     - latency_per_attack_step_iteration
   required_breakdowns: [fold, chain, attack_step]
-  primary_aggregation: macro_across_chains_and_folds
+  primary_aggregation: hierarchical_macro_scenarios_within_folds_then_folds
   packet_micro_only_conclusion_allowed: false
   sequence_latency: first_detecting_window_end_minus_first_malicious_packet_timestamp
   retain_missed_sequences_explicitly: true

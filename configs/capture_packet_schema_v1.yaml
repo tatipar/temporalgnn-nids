@@ -1,0 +1,194 @@
+# Candidate canonical packet schema for cAPTure.
+# It becomes frozen only after the real-data preparation smoke run is reviewed.
+schema_version: capture_packet_v1
+status: candidate_pending_runtime_validation
+source_artifact: packets.audit.parquet
+output_artifact: packets.capture_packet_v1.parquet
+
+topology:
+  node_key: ethernet_mac_address
+  source_column: src_endpoint
+  destination_column: dst_endpoint
+  normalize: lowercase_colon_separated
+  node_roles: [unicast, broadcast, multicast]
+  broadcast_address: ff:ff:ff:ff:ff:ff
+  preserve_broadcast_nodes: true
+  preserve_multicast_nodes: true
+  preserve_arp_and_other_non_ip_packets: true
+  missing_or_invalid_endpoint_policy: error
+  endpoint_identity_is_model_feature: false
+
+temporal_metadata:
+  retain_packet_timestamp: true
+  retain_packet_timestamp_ns: true
+  record_first_packet_timestamp_as_scenario_origin: true
+  canonical_packet_table_is_window_independent: true
+  window_indexes_are_created_during_graph_construction: true
+
+# Every model receives this identity-free current-packet feature family. Nullable
+# protocol-specific values remain null in the canonical Parquet. Their imputation,
+# presence masks, and scaling must be fitted using the current training fold only.
+features:
+  indicators:
+    is_arp:
+      source: raw::layers_arp_arp.hw.type
+      transform: present
+    is_ipv4:
+      source: raw::layers_ip_ip.version
+      transform: present
+    is_ipv6:
+      source: raw::layers_ipv6_ipv6.version
+      transform: present
+    is_tcp:
+      source: raw::layers_tcp_tcp.len
+      transform: present
+    is_udp:
+      source: raw::layers_udp_udp.checksum.status
+      transform: present
+    is_mqtt:
+      source: raw::layers_mqtt_mqtt.hdrflags
+      transform: present
+    is_ssh:
+      source: raw::layers_ssh_ssh.direction
+      transform: present
+    is_malformed:
+      source: raw::layers__ws.malformed__ws.malformed
+      transform: present
+    destination_is_broadcast:
+      source: dst_endpoint
+      transform: mac_broadcast
+    destination_is_multicast:
+      source: dst_endpoint
+      transform: mac_multicast_excluding_broadcast
+
+  numeric:
+    frame_length:
+      source: raw::layers_frame_frame.len
+      parser: decimal
+    ethernet_type:
+      source: raw::layers_eth_eth.type
+      parser: integer_auto_base
+    ipv4_dscp:
+      source: raw::layers_ip_ip.dsfield_tree_ip.dsfield.dscp
+      parser: decimal
+    ipv4_flag_df:
+      source: raw::layers_ip_ip.flags_tree_ip.flags.df
+      parser: decimal
+    ipv4_flag_mf:
+      source: raw::layers_ip_ip.flags_tree_ip.flags.mf
+      parser: decimal
+    ipv4_fragment_offset:
+      source: raw::layers_ip_ip.frag_offset
+      parser: decimal
+    ipv4_length:
+      source: raw::layers_ip_ip.len
+      parser: decimal
+    ipv4_ttl:
+      source: raw::layers_ip_ip.ttl
+      parser: decimal
+    ipv6_fragment_more:
+      source: raw::layers_ipv6_ipv6.fraghdr_ipv6.fraghdr.more
+      parser: decimal
+    tcp_source_port:
+      source: raw::layers_tcp_tcp.srcport
+      parser: decimal
+    tcp_destination_port:
+      source: raw::layers_tcp_tcp.dstport
+      parser: decimal
+    tcp_header_length:
+      source: raw::layers_tcp_tcp.hdr_len
+      parser: decimal
+    tcp_payload_length:
+      source: raw::layers_tcp_tcp.len
+      parser: decimal
+    tcp_window_value:
+      source: raw::layers_tcp_tcp.window_size_value
+      parser: decimal
+    mqtt_connack_reason_code:
+      source: raw::layers_mqtt_mqtt.connack.reason_code
+      parser: decimal
+    mqtt_message_type:
+      source: raw::layers_mqtt_mqtt.hdrflags_tree_mqtt.msgtype
+      parser: decimal
+    mqtt_duplicate_flag:
+      source: raw::layers_mqtt_mqtt.hdrflags_tree_mqtt.dupflag
+      parser: decimal
+    mqtt_reserved_flag:
+      source: raw::layers_mqtt_mqtt.hdrflags_tree_mqtt.hdr_reserved
+      parser: decimal
+    mqtt_qos:
+      source: raw::layers_mqtt_mqtt.hdrflags_tree_mqtt.qos
+      parser: decimal
+    mqtt_retain_flag:
+      source: raw::layers_mqtt_mqtt.hdrflags_tree_mqtt.retain
+      parser: decimal
+    mqtt_subscription_qos:
+      source: raw::layers_mqtt_mqtt.sub.qos
+      parser: decimal
+    mqtt_version:
+      source: raw::layers_mqtt_mqtt.ver
+      parser: decimal
+    ssh_padding_length:
+      source: raw::layers_ssh_SSH Version 2_ssh.padding_length
+      parser: decimal
+    ssh_direction:
+      source: raw::layers_ssh_ssh.direction
+      parser: decimal
+
+  bit_flags:
+    tcp_flag_fin:
+      source: raw::layers_tcp_tcp.flags
+      parser: integer_auto_base
+      mask: 1
+    tcp_flag_syn:
+      source: raw::layers_tcp_tcp.flags
+      parser: integer_auto_base
+      mask: 2
+    tcp_flag_rst:
+      source: raw::layers_tcp_tcp.flags
+      parser: integer_auto_base
+      mask: 4
+    tcp_flag_psh:
+      source: raw::layers_tcp_tcp.flags
+      parser: integer_auto_base
+      mask: 8
+    tcp_flag_ack:
+      source: raw::layers_tcp_tcp.flags
+      parser: integer_auto_base
+      mask: 16
+    tcp_flag_urg:
+      source: raw::layers_tcp_tcp.flags
+      parser: integer_auto_base
+      mask: 32
+    tcp_flag_ece:
+      source: raw::layers_tcp_tcp.flags
+      parser: integer_auto_base
+      mask: 64
+    tcp_flag_cwr:
+      source: raw::layers_tcp_tcp.flags
+      parser: integer_auto_base
+      mask: 128
+
+excluded_primary_roles:
+  - labels_and_attack_annotations
+  - absolute_timestamps_as_features
+  - packet_row_window_scenario_and_sequence_identifiers
+  - raw_ip_mac_and_endpoint_identities
+  - payload_credentials_and_content
+  - checksums
+  - ssh_banners_and_algorithm_fingerprints
+  - tcp_sequence_acknowledgment_and_stream_identifiers
+  - wireshark_flow_analysis_reassembly_and_future_context
+  - exact_duplicate_and_ambiguous_alias_columns
+  - schema_inconsistent_columns
+
+preprocessing:
+  categorical_encoding: none_in_canonical_v1
+  numeric_storage: nullable_float32
+  indicator_storage: float32_zero_or_one
+  missing_value_storage: null
+  imputation_scope: current_training_fold_only
+  missing_indicator_scope: current_training_fold_only
+  scaling_scope: current_training_fold_only_when_required_by_model
+  learned_feature_selection: none_in_primary_baseline
+  training_weights_are_canonical_features: false

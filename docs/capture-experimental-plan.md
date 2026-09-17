@@ -19,7 +19,8 @@ Status as of 2026-09-17:
 - the development, Test1, and Test2 attack-chain assignments are fixed;
 - the primary prediction unit is a packet;
 - the first implementation will use fixed, non-overlapping graph windows;
-- the exact packet schema and window duration remain open pending Gate 0;
+- the identity-free packet schema remains a runtime-validation candidate;
+- the primary graph window is fixed at five seconds before model results;
 - the SMOKE and five-scenario FULL_DEV audits completed without automatic
   data-integrity blockers;
 - no cAPTure classifier has been trained yet.
@@ -27,9 +28,10 @@ Status as of 2026-09-17:
 Implementation update (2026-09-17): the initial machine-readable manifest is
 available at [capture_experiment_v1.yaml](../configs/capture_experiment_v1.yaml).
 It records the locked assignments and explicit unresolved decisions (`null`).
-Initial Gate-0 window candidates are 1, 5, 10, and 30 seconds, with seed 42 as
-the initial reproducibility seed. Neither the selected duration nor its
-selection rule is frozen. Development packet CSV IDs, published filenames, and
+Gate-0 audited 1-, 5-, 10-, and 30-second windows. Five seconds is now the
+predeclared primary duration; the remaining widths are development-only
+ablations. Seed 42 remains the initial reproducibility seed. Development packet
+CSV IDs, published filenames, and
 byte sizes have now been verified from the authors' public folder listing at
 `dataset_creation/raw_traffic/normal_attack/train` and recorded in the manifest.
 The existing benign-source audit's IDs identify merge notebooks, not packet CSVs.
@@ -56,9 +58,20 @@ The post-audit decision module
 completed FULL_DEV artifact collection to compare repeated benign backgrounds,
 audit MAC and network-layer topology cases, and generate a reviewable feature
 inventory. Its actions are diagnostic proposals; the module does not freeze
-the endpoint, feature, sampling, or window policies. Its runtime output remains
-pending until notebook Section 9 is executed against the completed FULL_DEV
-artifacts.
+the endpoint, feature, sampling, or window policies. The runtime audit completed
+without automatic blockers and confirmed exact normal-packet equality inside
+both declared benign-source groups.
+
+Canonical preparation candidate (2026-09-17):
+[capture_packet_schema_v1.yaml](../configs/capture_packet_schema_v1.yaml) records
+the proposed identity-free packet features, Ethernet-address topology, and
+special group-address handling. The canonical packet table retains timestamps
+but is independent of graph windows and training weights.
+[capture_prepare.ipynb](../code/python/notebook/capture_prepare.ipynb)
+uses [capture_prepare.py](../code/python/utils/capture_prepare.py) to validate the
+proposal first on a real-data SMOKE run and then, after explicit review, on all
+five development scenarios. The schema remains a candidate until that runtime
+validation is reviewed; no classifier is trained by this preparation step.
 
 ## Why cAPTure is being evaluated
 
@@ -160,6 +173,14 @@ development chain is validated exactly once through out-of-fold predictions.
 Model and hyperparameter comparisons must use macro summaries across folds and
 chains so that packet-rich chains do not dominate.
 
+The primary selection metric is hierarchical macro out-of-fold packet ROC-AUC.
+Compute an unweighted packet ROC-AUC separately for each validation scenario,
+average scenarios inside each fold, and then average the two fold means. This
+keeps both benign blocks equally represented and gives every scenario equal
+weight inside its fold. Packet PR-AUC remains a diagnostic metric rather than a
+selection criterion because its random baseline varies with each scenario's
+attack prevalence.
+
 This validation is deliberately conservative but imperfect. Each fold changes
 both the benign background and the attack paths, so it measures joint
 background/path generalization. It cannot isolate those effects. Splitting
@@ -203,8 +224,8 @@ each scenario:
 ```
 
 Windows must never cross scenario or dataset-split boundaries. A packet is an
-edge in exactly one graph and receives one prediction. The exact window width
-will be selected from development-only diagnostics and validation results.
+edge in exactly one graph and receives one prediction. The primary width is
+the predeclared five-second duration; model results do not select it.
 
 The current ST-GNN processes a sequence of graph snapshots. Within one
 window, it uses the complete graph, updates its recurrent node memory, and
@@ -245,9 +266,13 @@ memory updated only by new target edges.
 
 ### Window robustness
 
-Window duration is not yet fixed. Gate 0 must report packets, nodes, and edges
-per candidate duration as well as attack-step durations. Candidate widths and
-the selection rule must be recorded before final testing.
+The primary development window is five seconds, selected before model results
+as an engineering compromise among decision latency, occupied-window continuity,
+context, and graph size. The canonical packet table does not store window IDs;
+the graph builder deterministically assigns them from the scenario's first
+packet timestamp and the declared width. One-, ten-, and thirty-second windows
+are reserved for a later development-only width ablation on the selected
+contextual model, not a complete repetition of the model ladder.
 
 At least one fixed-window sensitivity check should shift the window origin by
 half a window. A large performance change under that shift is evidence that
@@ -339,6 +364,15 @@ Validation may choose among predefined feature procedures or values such as
 `top_k`. It must not participate in fitting the selector being evaluated.
 After the procedure is selected, it may be refit on all five development
 chains before final evaluation.
+
+Training weights are not canonical packet fields. For each fold, compute them
+using only its training scenarios so that every `(scenario, binary class)` cell
+has the same total weight, then normalize the training weights to mean one.
+XGBoost receives them through `sample_weight`; neural models apply them to the
+per-edge loss before reduction. Validation and test metrics are unweighted
+inside each scenario and use the hierarchical macro aggregation described
+above. This fold-local policy prevents packet-rich attack chains and repeated
+benign backgrounds from dominating without changing graph structure or labels.
 
 The authors' published top-100 feature list is not automatically valid for
 the primary held-out-chain experiment. It was derived using their full train
@@ -535,9 +569,10 @@ against XGB-P using out-of-fold predictions and the same alert budgets.
 
 ### Phase 5: build graphs and run graph models
 
-Freeze the graph schema and selected window duration from development only.
-Build exactly one graph per fixed window and verify a one-to-one correspondence
-between canonical packet records, graph edges, labels, and model outputs.
+Confirm the graph schema after preparation and use the predeclared five-second
+window. Build exactly one graph per fixed window and verify a one-to-one
+correspondence between canonical packet records, graph edges, labels, and model
+outputs.
 
 Train the graph baselines and ST-GNN under the same folds. Verify memory resets,
 strict graph timestamp ordering, scenario isolation, and aligned decision
@@ -580,7 +615,7 @@ chains such as `user_prop` can dominate it.
 Only after the confirmatory evaluation is preserved, consider:
 
 - shifted fixed-window origins;
-- alternative development-selected window widths;
+- predeclared one-, ten-, and thirty-second development ablation widths;
 - temporal jitter sensitivity;
 - author top-100 feature reproduction;
 - raw endpoint-identity ablation;
