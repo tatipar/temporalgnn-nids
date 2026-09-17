@@ -30,7 +30,18 @@ the initial reproducibility seed. Neither the selected duration nor its
 selection rule is frozen. Packet CSV IDs and published filenames still require
 source-metadata verification; the existing audit's IDs identify merge notebooks,
 not packet CSVs. Readiness requirements are declarative until runners implement
-their checks. The planned data audit notebook is named `capture_data_gate0.ipynb`.
+their checks. The data audit notebook is named `capture_data_gate0.ipynb`.
+
+Gate-0 implementation: [capture_data_gate0.ipynb](../code/python/notebook/capture_data_gate0.ipynb)
+uses the CPU-only [capture_data.py](../code/python/utils/capture_data.py) module.
+It supports sequential local staging, mounted-Drive persistence with checksum
+verification, explicit source/schema bindings, and a reviewed-SMOKE requirement
+before FULL_DEV. Packet CSV bindings are supplied in the notebook until verified
+metadata is available in the manifest; the resolved configuration is saved with
+each run. It preserves raw fields in audit Parquet, without freezing model
+features or selecting a window width. Runtime validation is pending execution
+of the notebook's synthetic checks and smoke audit in Colab. The general model
+and final-test readiness requirements remain declarative.
 
 ## Why cAPTure is being evaluated
 

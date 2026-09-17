@@ -1,0 +1,6 @@
+# CPU-only dependencies for cAPTure Gate 0.
+pandas>=2.2,<3
+pyarrow>=16,<24
+duckdb>=1.1,<2
+PyYAML>=6,<7
+gdown>=5,<6

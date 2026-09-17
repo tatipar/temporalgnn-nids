@@ -7,3 +7,5 @@ the code used to compare edge-level intrusion-detection models.
 - [Training graph contract](docs/training-graph-contract.md)
 - [Training core contract](docs/training-core-contract.md)
 - [Temporal state and ablation contract](docs/temporal-state-and-ablation-contract.md)
+- [cAPTure experimental plan](docs/capture-experimental-plan.md)
+- [cAPTure Gate-0 CPU/Drive audit notebook](code/python/notebook/capture_data_gate0.ipynb)
