@@ -116,7 +116,7 @@ def inspect_csv(path: Path, *, separator: str = ",", encoding: str = "utf-8-sig"
 
 
 def stage_source(source: dict, local_dir: Path) -> Path:
-    """Stage one explicitly verified CSV from mounted Drive or an official file ID."""
+    """Stage one CSV, reusing only a complete, checksum-verified local download."""
     if source.get("metadata_verified") is not True:
         raise ValueError("Verify the source scenario, published filename, and location first.")
     name = source.get("expected_filename")
@@ -125,8 +125,20 @@ def stage_source(source: dict, local_dir: Path) -> Path:
     local_dir = Path(local_dir)
     local_dir.mkdir(parents=True, exist_ok=True)
     target = local_dir / name
+    receipt_path = local_dir / (name + ".source.json")
+    binding = {key: source.get(key) for key in (
+        "drive_path", "source_file_id", "expected_filename", "expected_size_bytes", "sha256")}
     if target.exists():
-        raise FileExistsError(f"Use a fresh staging directory: {target}")
+        if not receipt_path.exists():
+            raise FileExistsError(f"Unverified existing file; use a fresh staging directory: {target}")
+        receipt = json.loads(receipt_path.read_text())
+        if receipt.get("binding") != binding or sha256_file(target) != receipt.get("sha256"):
+            raise ValueError(f"Cached source binding or checksum mismatch: {target}")
+        print(f"Reusing verified local source: {target.name}", flush=True)
+        return target
+    partial = local_dir / (name + ".part")
+    if partial.exists():
+        raise FileExistsError(f"Incomplete previous download; use a fresh staging directory: {partial}")
     if source.get("drive_path"):
         original = Path(source["drive_path"])
         if original.name != name:
@@ -134,7 +146,7 @@ def stage_source(source: dict, local_dir: Path) -> Path:
         required = original.stat().st_size + 2 * 1024**3
         if shutil.disk_usage(local_dir).free < required:
             raise OSError("Insufficient local disk space to stage the source with a reserve.")
-        shutil.copyfile(original, target)
+        shutil.copyfile(original, partial)
     elif source.get("source_file_id"):
         size = source.get("expected_size_bytes")
         if not isinstance(size, int) or size <= 0:
@@ -142,15 +154,20 @@ def stage_source(source: dict, local_dir: Path) -> Path:
         if shutil.disk_usage(local_dir).free < size + 2 * 1024**3:
             raise OSError("Insufficient local disk space for the declared download.")
         import gdown
-        result = gdown.download(id=source["source_file_id"], output=str(target), quiet=False)
+        result = gdown.download(id=source["source_file_id"], output=str(partial), quiet=False)
         if result is None:
             raise RuntimeError("Source download failed.")
     else:
         raise ValueError("Provide either drive_path or a verified source_file_id.")
-    if source.get("sha256") and sha256_file(target) != source["sha256"]:
+    if source.get("expected_size_bytes") is not None and partial.stat().st_size != source["expected_size_bytes"]:
+        raise ValueError("Downloaded byte size differs from the verified source metadata.")
+    source_hash = sha256_file(partial)
+    if source.get("sha256") and source_hash != source["sha256"]:
         raise ValueError("Source checksum does not match.")
-    inspect_csv(target, separator=source.get("separator", ","),
+    inspect_csv(partial, separator=source.get("separator", ","),
                 encoding=source.get("encoding", "utf-8-sig"), sample_rows=1)
+    partial.rename(target)
+    write_json(receipt_path, {"binding": binding, "sha256": source_hash})
     return target
 
 
@@ -406,7 +423,7 @@ def run_gate0(*, manifest_path: Path, mode: str, sources: dict,
               schemas: dict[str, AuditSchema], local_root: Path, drive_run_dir: Path,
               smoke_review_path: Path | None = None, chunksize: int = 25000,
               memory_limit: str = "2GB", threads: int = 2,
-              keep_audit_parquet: bool = True) -> dict:
+              keep_audit_parquet: bool = True, source_cache_root: Path | None = None) -> dict:
     """Run scenarios sequentially and persist completed artifacts to mounted Drive.
 
     The caller chooses a fresh run directory. Local temporary files are removed
@@ -427,7 +444,7 @@ def run_gate0(*, manifest_path: Path, mode: str, sources: dict,
         source = sources[scenario]
         if source.get("metadata_verified") is not True:
             raise ValueError(f"Source metadata must be verified: {scenario}")
-        for key in ("source_file_id", "expected_filename"):
+        for key in ("source_file_id", "expected_filename", "expected_size_bytes"):
             frozen = manifest["scenarios"][scenario].get(key)
             if frozen is not None and source.get(key) != frozen:
                 raise ValueError(f"Source configuration disagrees with manifest: {scenario}/{key}")
@@ -452,7 +469,8 @@ def run_gate0(*, manifest_path: Path, mode: str, sources: dict,
         work = Path(tempfile.mkdtemp(prefix=f"{scenario}_", dir=local_root))
         print(f"Starting {scenario}. Local workspace: {work}", flush=True)
         try:
-            source_path = stage_source(sources[scenario], work / "raw")
+            source_dir = Path(source_cache_root) / scenario if source_cache_root is not None else work / "raw"
+            source_path = stage_source(sources[scenario], source_dir)
             output = work / "audit"
             report = audit_scenario(source_path, output, manifest, scenario, schemas[scenario],
                                     chunksize=chunksize, memory_limit=memory_limit, threads=threads)
@@ -476,6 +494,9 @@ def run_gate0(*, manifest_path: Path, mode: str, sources: dict,
                                  "report": str(destination / "audit_report.json")}
             write_json(drive_run_dir / "run_status.json", {"complete": False, "scenarios": results})
             # Only this function's isolated, successfully persisted workspace is deleted.
+            if source_cache_root is not None:
+                source_path.unlink()
+                source_path.with_name(source_path.name + ".source.json").unlink()
             shutil.rmtree(work)
             print(f"Saved and verified {scenario} on Drive. Removed its temporary local copy.", flush=True)
             if report["blockers"]:

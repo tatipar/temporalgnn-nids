@@ -27,18 +27,24 @@ available at [capture_experiment_v1.yaml](../configs/capture_experiment_v1.yaml)
 It records the locked assignments and explicit unresolved decisions (`null`).
 Initial Gate-0 window candidates are 1, 5, 10, and 30 seconds, with seed 42 as
 the initial reproducibility seed. Neither the selected duration nor its
-selection rule is frozen. Packet CSV IDs and published filenames still require
-source-metadata verification; the existing audit's IDs identify merge notebooks,
-not packet CSVs. Readiness requirements are declarative until runners implement
+selection rule is frozen. Development packet CSV IDs, published filenames, and
+byte sizes have now been verified from the authors' public folder listing at
+`dataset_creation/raw_traffic/normal_attack/train` and recorded in the manifest.
+The existing benign-source audit's IDs identify merge notebooks, not packet CSVs.
+Readiness requirements are declarative until runners implement
 their checks. The data audit notebook is named `capture_data_gate0.ipynb`.
 
 Gate-0 implementation: [capture_data_gate0.ipynb](../code/python/notebook/capture_data_gate0.ipynb)
 uses the CPU-only [capture_data.py](../code/python/utils/capture_data.py) module.
 It supports sequential local staging, mounted-Drive persistence with checksum
 verification, explicit source/schema bindings, and a reviewed-SMOKE requirement
-before FULL_DEV. Packet CSV bindings are supplied in the notebook until verified
-metadata is available in the manifest; the resolved configuration is saved with
-each run. It preserves raw fields in audit Parquet, without freezing model
+before FULL_DEV. The notebook downloads individual development CSVs directly
+from the authors' Drive using manifest IDs. It previews the first scenario and
+reuses that verified local download during the audit, then processes subsequent
+scenarios sequentially. No raw CSV copy in the user's Drive is required. The
+resolved configuration is saved with each run. Metadata verification does not
+establish content integrity; full CSV runtime validation remains part of Gate 0.
+It preserves raw fields in audit Parquet, without freezing model
 features or selecting a window width. Runtime validation is pending execution
 of the notebook's synthetic checks and smoke audit in Colab. The general model
 and final-test readiness requirements remain declarative.

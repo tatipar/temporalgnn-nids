@@ -17,7 +17,12 @@ sources:
   provenance_scope: author_merge_code_declarations_not_csv_content_verification
   # CSV IDs and published names must be verified before downloading each file.
   # Merge-notebook IDs must never be substituted for packet CSV IDs.
-  csv_catalog_status: pending_source_metadata_verification
+  csv_catalog_status: development_metadata_verified_contents_pending_gate0
+  official_root_url: https://drive.google.com/drive/folders/1d6PkZLMF6Nu7bsmxhAjP4wWwuLUZ2E-2
+  development_folder_url: https://drive.google.com/drive/folders/1f8koJbuPs0_CWoItWdt3VF-lZ_R6JAms
+  development_folder_path: dataset_creation/raw_traffic/normal_attack/train
+  metadata_verified_on: '2026-09-17'
+  metadata_evidence: public_drive_folder_listing_names_ids_and_byte_sizes
   inspect_held_out_author_train_contents: false
   access_final_contents_before_pipeline_freeze: false
 
@@ -27,36 +32,41 @@ scenarios:
     author_split: train
     benign_source: normal_2_3_4
     assignment: development
-    source_file_id: null
-    expected_filename: null
+    source_file_id: 1nfR1RRZO3jMG_A9KDY8wyr0A0rVlHiBN
+    expected_filename: normal_empty_conn_train.csv
+    expected_size_bytes: 1031250713
   train_qos_mid:
     attack_chain: qos_mid
     author_split: train
     benign_source: normal_2_3_4
     assignment: development
-    source_file_id: null
-    expected_filename: null
+    source_file_id: 1syQC83AZTi-J6VHW2g1p__vqKQorXq6l
+    expected_filename: normal_qos_mid_train.csv
+    expected_size_bytes: 1041072582
   train_dollar_char:
     attack_chain: dollar_char
     author_split: train
     benign_source: normal_15_16_17
     assignment: development
-    source_file_id: null
-    expected_filename: null
+    source_file_id: 1N3IcqQz6tQe-iuvoqWWwVarPCJDK_cpe
+    expected_filename: normal_dollar_char_train.csv
+    expected_size_bytes: 1968906771
   train_slash_char:
     attack_chain: slash_char
     author_split: train
     benign_source: normal_15_16_17
     assignment: development
-    source_file_id: null
-    expected_filename: null
+    source_file_id: 1a0lhWtXsV5i51XCGe0IP7lZURLf9SOD3
+    expected_filename: normal_slash_char_train.csv
+    expected_size_bytes: 5095134284
   train_sub_exf:
     attack_chain: sub_exf
     author_split: train
     benign_source: normal_15_16_17
     assignment: development
-    source_file_id: null
-    expected_filename: null
+    source_file_id: 1YJzcazSvs987g1xPWal8gxBpqeYfcSp4
+    expected_filename: normal_sub_exf_train.csv
+    expected_size_bytes: 1659494117
   train_pub_exf:
     attack_chain: pub_exf
     author_split: train

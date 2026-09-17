@@ -3,12 +3,13 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
 from utils.capture_data import (
     AuditSchema, audit_scenario, inspect_csv, load_manifest, selected_scenarios,
-    sha256_file, validate_smoke_review, write_json,
+    sha256_file, stage_source, validate_smoke_review, write_json,
 )
 
 
@@ -79,6 +80,29 @@ class CaptureGate0Tests(unittest.TestCase):
         path.write_text("src,src\na,b\n")
         with self.assertRaises(ValueError):
             inspect_csv(path)
+
+    def test_staged_source_reuse_checks_binding_and_checksum(self):
+        original = self.create_csv()
+        source = {"drive_path": str(original), "expected_filename": original.name,
+                  "expected_size_bytes": original.stat().st_size, "metadata_verified": True}
+        staged = stage_source(source, self.root / "cache")
+        with patch("utils.capture_data.shutil.copyfile", side_effect=AssertionError("Unexpected second copy")):
+            self.assertEqual(stage_source(source, self.root / "cache"), staged)
+        altered_source = {**source, "source_file_id": "different-source"}
+        with self.assertRaises(ValueError):
+            stage_source(altered_source, self.root / "cache")
+        staged.write_text("corrupted")
+        with self.assertRaises(ValueError):
+            stage_source(source, self.root / "cache")
+
+    def test_source_size_mismatch_never_creates_completed_cache(self):
+        original = self.create_csv()
+        source = {"drive_path": str(original), "expected_filename": original.name,
+                  "expected_size_bytes": original.stat().st_size + 1, "metadata_verified": True}
+        with self.assertRaises(ValueError):
+            stage_source(source, self.root / "cache")
+        self.assertFalse((self.root / "cache" / original.name).exists())
+        self.assertFalse((self.root / "cache" / (original.name + ".source.json")).exists())
 
     def test_smoke_review_binds_reports_and_manifest(self):
         manifest_hash = "example_manifest_hash"
