@@ -13,13 +13,15 @@ It is to test, without data leakage, whether temporal and/or structural context
 provides useful and earlier attack-chain detection than current-packet
 features alone.
 
-Status as of 2026-09-16:
+Status as of 2026-09-17:
 
 - benign-background provenance has been audited from the authors' notebooks;
 - the development, Test1, and Test2 attack-chain assignments are fixed;
 - the primary prediction unit is a packet;
 - the first implementation will use fixed, non-overlapping graph windows;
 - the exact packet schema and window duration remain open pending Gate 0;
+- the SMOKE and five-scenario FULL_DEV audits completed without automatic
+  data-integrity blockers;
 - no cAPTure classifier has been trained yet.
 
 Implementation update (2026-09-17): the initial machine-readable manifest is
@@ -42,12 +44,21 @@ before FULL_DEV. The notebook downloads individual development CSVs directly
 from the authors' Drive using manifest IDs. It previews the first scenario and
 reuses that verified local download during the audit, then processes subsequent
 scenarios sequentially. No raw CSV copy in the user's Drive is required. The
-resolved configuration is saved with each run. Metadata verification does not
-establish content integrity; full CSV runtime validation remains part of Gate 0.
-It preserves raw fields in audit Parquet, without freezing model
-features or selecting a window width. Runtime validation is pending execution
-of the notebook's synthetic checks and smoke audit in Colab. The general model
-and final-test readiness requirements remain declarative.
+resolved configuration is saved with each run. Metadata verification alone
+does not establish content integrity. The SMOKE and FULL_DEV executions
+subsequently audited every source row and persisted checksum-verified artifacts
+on Drive. The audit Parquet files preserve raw fields without freezing model
+features or selecting a window width. The general model and final-test
+readiness requirements remain declarative.
+
+The post-audit decision module
+[capture_gate0_review.py](../code/python/utils/capture_gate0_review.py) reuses a
+completed FULL_DEV artifact collection to compare repeated benign backgrounds,
+audit MAC and network-layer topology cases, and generate a reviewable feature
+inventory. Its actions are diagnostic proposals; the module does not freeze
+the endpoint, feature, sampling, or window policies. Its runtime output remains
+pending until notebook Section 9 is executed against the completed FULL_DEV
+artifacts.
 
 ## Why cAPTure is being evaluated
 
