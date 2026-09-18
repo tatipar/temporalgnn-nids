@@ -1,0 +1,131 @@
+# Candidate fold-local preprocessing contract for canonical cAPTure packets.
+# This file defines semantic roles and deterministic encodings. It is not
+# frozen until the FULL_DEV feature profile has been reviewed.
+schema_version: capture_preprocessing_v1
+status: candidate_pending_feature_profile
+canonical_packet_schema_version: capture_packet_v1
+
+feature_roles:
+  binary:
+    - destination_is_broadcast
+    - destination_is_multicast
+    - is_arp
+    - is_ipv4
+    - is_ipv6
+    - is_malformed
+    - is_mqtt
+    - is_ssh
+    - is_tcp
+    - is_udp
+    - ipv4_flag_df
+    - ipv4_flag_mf
+    - ipv6_fragment_more
+    - mqtt_duplicate_flag
+    - mqtt_retain_flag
+    - tcp_flag_ack
+    - tcp_flag_cwr
+    - tcp_flag_ece
+    - tcp_flag_fin
+    - tcp_flag_psh
+    - tcp_flag_rst
+    - tcp_flag_syn
+    - tcp_flag_urg
+  numeric_magnitude:
+    - frame_length
+    - ipv4_fragment_offset
+    - ipv4_length
+    - ipv4_ttl
+    - ssh_padding_length
+    - tcp_header_length
+    - tcp_payload_length
+    - tcp_window_value
+  categorical_code:
+    - ethernet_type
+    - ipv4_dscp
+    - mqtt_connack_reason_code
+    - mqtt_message_type
+    - mqtt_qos
+    - mqtt_reserved_flag
+    - mqtt_subscription_qos
+    - mqtt_version
+    - ssh_direction
+  tcp_port:
+    - tcp_source_port
+    - tcp_destination_port
+
+port_encoding:
+  representation: fixed_exhaustive_one_hot_per_direction
+  source_feature: tcp_source_port
+  destination_feature: tcp_destination_port
+  tcp_indicator: is_tcp
+  roles:
+    mqtt_messaging: [1883, 8883]
+    web_http_proxy: [80, 81, 443, 3128, 8000, 8008, 8080, 8081, 8082, 8084, 8088, 8090, 8181, 8443, 8545, 8888]
+    admin_remote: [22, 23, 222, 1723, 2222, 2323, 3389, 3390, 3394, 5555, 5900, 5901, 5902, 5903, 5985, 5986, 8022]
+    windows_smb_rpc: [135, 137, 138, 139, 445]
+    infrastructure: [53, 67, 68, 88, 123, 161, 389, 464, 500, 514, 546, 547, 636, 1900, 5060, 5353, 5355]
+    database: [1433, 1434, 1521, 3306, 5432, 6379, 11211, 27017, 9200]
+  residual_roles:
+    other_privileged: integer ports 1..1023 outside named roles
+    other_registered: integer ports 1024..49151 outside named roles
+    other_dynamic: integer ports 49152..65535 outside named roles
+    zero_or_reserved: port 0 on a TCP packet
+    not_applicable_to_tcp: null port on a non-TCP packet
+  ordered_roles:
+    - mqtt_messaging
+    - web_http_proxy
+    - admin_remote
+    - windows_smb_rpc
+    - infrastructure
+    - database
+    - other_privileged
+    - other_registered
+    - other_dynamic
+    - zero_or_reserved
+    - not_applicable_to_tcp
+  invalid_policy:
+    non_integer_or_out_of_range: error
+    null_on_tcp_packet: error
+    nonnull_on_non_tcp_packet: error
+
+protocol_encoding:
+  representation: existing_multihot_layer_indicators
+  network_layer: [is_arp, is_ipv4, is_ipv6]
+  transport_layer: [is_tcp, is_udp]
+  application_layer: [is_mqtt, is_ssh]
+  special_state: [is_malformed]
+  constraints:
+    network_layer_at_most_one: true
+    transport_layer_at_most_one: true
+    mqtt_requires_tcp: true
+    ssh_requires_tcp: true
+  raw_iana_protocol_one_hot: false
+
+numeric_policy:
+  canonical_nulls_are_preserved: true
+  fit_scope: current_fold_training_scenarios_only
+  imputation: pending_feature_profile
+  presence_indicators: pending_feature_profile
+  skew_transform: pending_feature_profile
+  scaling: pending_feature_profile
+
+categorical_code_policy:
+  fit_scope: current_fold_training_scenarios_only
+  preferred_representation: fixed_protocol_domain_with_missing_and_other
+  learned_top_k_vocabulary: false
+  exact_domains: pending_feature_profile
+
+primary_model_view:
+  shared_across_models: true
+  raw_port_values_are_model_features: false
+  port_role_features_per_direction: 11
+  canonical_feature_count: 42
+  feature_count_after_port_encoding_only: 62
+  final_feature_count: null
+
+profile:
+  quantiles: [0.0, 0.01, 0.5, 0.99, 1.0]
+  maximum_reported_values_per_categorical_feature: 64
+  report_fold_training_constants: true
+  report_validation_unseen_codes_without_refitting: true
+  validation_values_may_modify_encoder: false

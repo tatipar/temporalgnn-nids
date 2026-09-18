@@ -3,7 +3,7 @@
 # Paths are relative to the repository root. Runtime reports are separate artifacts.
 manifest_version: 1
 experiment_id: capture_feasibility_v1
-status: draft_gate0_preparation_pending
+status: development_feature_profile_pending
 decision_record: docs/capture-experimental-plan.md
 dataset: cAPTure
 objective: >-
@@ -171,22 +171,25 @@ prepared_data:
   process_one_raw_scenario_at_a_time: true
   commit_raw_or_derived_datasets: false
   schema_version: capture_packet_v1_candidate
+  completed_full_dev_run_id: 20260917T235058_827743Z_prepare_full_dev
   required_columns:
     - packet_id
+    - source_row_id
     - scenario
     - attack_chain
     - benign_source
     - author_split
     - packet_timestamp
-    - window_id
-    - window_start
-    - window_end
+    - packet_timestamp_ns
     - src_endpoint
     - dst_endpoint
+    - src_node_role
+    - dst_node_role
     - binary_label
     - attack_step
     - phase
     - sequence_id
+    - raw_row_sha256
   packet_id_policy: stable_source_file_and_original_row_identity
   packet_feature_columns: configs/capture_packet_schema_v1.yaml#features
   raw_to_canonical_column_mapping: configs/capture_packet_schema_v1.yaml
@@ -222,9 +225,12 @@ features:
   fitted_preprocessing_scope: current_fold_training_scenarios_only
   final_preprocessing_refit_scope: all_development_scenarios
   selected_columns: configs/capture_packet_schema_v1.yaml#features
-  categorical_encoding: no_raw_categorical_features_in_capture_packet_v1
+  preprocessing_contract: configs/capture_preprocessing_v1.yaml
+  categorical_encoding: fixed_semantic_taxonomies_preferred_over_fold_learned_vocabularies
+  tcp_port_encoding: fixed_exhaustive_roles_for_source_and_destination
+  protocol_encoding: multihot_by_network_transport_and_application_layer
   missing_value_handling: nullable_in_canonical_fit_imputation_and_masks_on_training_fold_only
-  scaling: model_specific_fit_on_training_fold_only
+  scaling: pending_full_dev_feature_profile_fit_on_training_fold_only
   learned_feature_selection_procedure: none_for_primary_baseline
 
 windows:
@@ -324,7 +330,7 @@ evaluation:
 
 readiness:
   # Declarative requirements for future consumers; no runner enforces them yet.
-  gate0_passed: false
+  gate0_passed: true
   xgb_p_sanity_gate_passed: false
   final_pipeline_frozen: false
   requirements:

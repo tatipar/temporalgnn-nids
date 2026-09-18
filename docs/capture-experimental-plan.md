@@ -13,16 +13,18 @@ It is to test, without data leakage, whether temporal and/or structural context
 provides useful and earlier attack-chain detection than current-packet
 features alone.
 
-Status as of 2026-09-17:
+Status as of 2026-09-18:
 
 - benign-background provenance has been audited from the authors' notebooks;
 - the development, Test1, and Test2 attack-chain assignments are fixed;
 - the primary prediction unit is a packet;
 - the first implementation will use fixed, non-overlapping graph windows;
-- the identity-free packet schema remains a runtime-validation candidate;
+- the identity-free canonical packet extraction completed its SMOKE and
+  five-scenario FULL_DEV runs;
 - the primary graph window is fixed at five seconds before model results;
 - the SMOKE and five-scenario FULL_DEV audits completed without automatic
   data-integrity blockers;
+- fold-aware feature profiling and preprocessing review are next;
 - no cAPTure classifier has been trained yet.
 
 Implementation update (2026-09-17): the initial machine-readable manifest is
@@ -62,7 +64,7 @@ the endpoint, feature, sampling, or window policies. The runtime audit completed
 without automatic blockers and confirmed exact normal-packet equality inside
 both declared benign-source groups.
 
-Canonical preparation candidate (2026-09-17):
+Canonical preparation (2026-09-17):
 [capture_packet_schema_v1.yaml](../configs/capture_packet_schema_v1.yaml) records
 the proposed identity-free packet features, Ethernet-address topology, and
 special group-address handling. The canonical packet table retains timestamps
@@ -70,8 +72,21 @@ but is independent of graph windows and training weights.
 [capture_prepare.ipynb](../code/python/notebook/capture_prepare.ipynb)
 uses [capture_prepare.py](../code/python/utils/capture_prepare.py) to validate the
 proposal first on a real-data SMOKE run and then, after explicit review, on all
-five development scenarios. The schema remains a candidate until that runtime
-validation is reviewed; no classifier is trained by this preparation step.
+five development scenarios. Both runs completed and the resulting counts,
+timestamps, node roles, and structural null patterns were reviewed without
+blockers. The canonical extraction is still kept separate from the model-input
+preprocessing contract; no classifier is trained by this preparation step.
+
+Feature-profile candidate (2026-09-18):
+[capture_preprocessing_v1.yaml](../configs/capture_preprocessing_v1.yaml)
+declares semantic feature roles, deterministic bidirectional TCP-port roles,
+and layered protocol indicators. The CPU-only
+[capture_feature_profile.ipynb](../code/python/notebook/capture_feature_profile.ipynb)
+uses [capture_feature_profile.py](../code/python/utils/capture_feature_profile.py)
+to validate the completed prepared artifacts and report numeric ranges,
+categorical values, fixed port-role coverage, fold-training constants, and
+validation-only categorical codes. It writes only a compact report; it does
+not materialize transformed packets or fit a model.
 
 ## Why cAPTure is being evaluated
 
@@ -360,6 +375,27 @@ includes:
 - model-based feature ranking;
 - the identities of learned top-k features.
 
+The canonical packet table remains nullable and model-independent. Before the
+packet-only baseline, a separate FULL_DEV feature profile must validate
+semantic types, numeric ranges, fold-training constants, structural missingness,
+and categorical coverage. This profile is descriptive: validation categories
+must never be added to a fitted training vocabulary.
+
+The primary port representation reuses the deterministic design used by the
+NF-v3/CIC2018 pipeline, adapted to packet direction and MQTT. Source and
+destination TCP ports are encoded separately with the same fixed exhaustive
+roles: MQTT messaging, web/proxy, remote administration, Windows SMB/RPC,
+infrastructure, database, residual privileged, registered and dynamic ranges,
+port zero, and not-applicable-to-TCP. Raw port numbers are not primary model
+features. Because this taxonomy is fixed before model fitting, a valid port
+cannot become an unseen validation category.
+
+Protocol indicators remain multi-hot by layer. ARP/IPv4/IPv6, TCP/UDP, and
+MQTT/SSH describe different layers and may legitimately coexist; they must not
+be collapsed into the single IANA-protocol one-hot representation used by the
+older flow pipeline. The exact candidate contract is
+`configs/capture_preprocessing_v1.yaml`.
+
 Validation may choose among predefined feature procedures or values such as
 `top_k`. It must not participate in fitting the selector being evaluated.
 After the procedure is selected, it may be refit on all five development
@@ -549,6 +585,11 @@ Do not process or inspect the held-out author-train scenario contents.
 
 ### Phase 3: train and audit XGB-P
 
+First run the fold-aware feature profile against the completed canonical
+FULL_DEV artifacts and review the fixed port-role coverage, remaining
+categorical code domains, numeric ranges, and fold-training constants. Freeze
+the preprocessing contract only after this review.
+
 Run both development folds with a small, predefined hyperparameter search.
 Generate one out-of-fold score per development packet and retain full
 provenance.
@@ -717,12 +758,11 @@ Every run must record:
 
 The next implementation work should produce, in this order:
 
-1. a machine-readable cAPTure experiment manifest;
-2. `capture_data_gate0.ipynb` with `SMOKE` and `FULL_DEV` modes;
-3. canonical per-scenario Parquet and audit-report schemas;
-4. an XGB-P training and out-of-fold evaluation notebook or script;
-5. XGB-P+T feature generation only after XGB-P passes its sanity gate;
-6. packet-graph construction and ST-GNN adaptation only after the tabular
+1. completed Gate-0 and canonical per-scenario preparation artifacts;
+2. a fold-aware FULL_DEV feature profile and reviewed preprocessing contract;
+3. an XGB-P training and out-of-fold evaluation notebook or script;
+4. XGB-P+T feature generation only after XGB-P passes its sanity gate;
+5. packet-graph construction and ST-GNN adaptation only after the tabular
    baselines are trustworthy.
 
 ## Related project documents
