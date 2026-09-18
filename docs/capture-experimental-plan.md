@@ -396,6 +396,24 @@ be collapsed into the single IANA-protocol one-hot representation used by the
 older flow pipeline. The exact candidate contract is
 `configs/capture_preprocessing_v1.yaml`.
 
+The reviewed primary model view has 103 fixed output columns: 23 direct binary
+indicators, two presence indicators, eight transformed numeric magnitudes, 22
+source/destination port-role indicators, and 48 deterministic encodings of
+protocol fields. `ethernet_type` is excluded because it is exactly redundant
+with the ARP/IPv4/IPv6 indicators. Raw TCP ports are replaced by port roles.
+`mqtt_version` and `mqtt_connack_reason_code` remain in the canonical packet
+artifacts for auditing and secondary ablations but are excluded from the
+primary view because they are respectively near-constant and extremely sparse
+with suspicious invalid values.
+
+The output order remains fixed across models and folds. Each fold fits numeric
+means and population standard deviations only on its training scenarios. It
+also identifies output columns that are constant after candidate encoding and
+applies the resulting zero mask to both training and validation. A value that
+appears only in validation therefore cannot activate an untrained neural input
+weight. The fixed protocol-domain encoders themselves do not learn a vocabulary
+from either partition.
+
 Validation may choose among predefined feature procedures or values such as
 `top_k`. It must not participate in fitting the selector being evaluated.
 After the procedure is selected, it may be refit on all five development
@@ -588,7 +606,12 @@ Do not process or inspect the held-out author-train scenario contents.
 First run the fold-aware feature profile against the completed canonical
 FULL_DEV artifacts and review the fixed port-role coverage, remaining
 categorical code domains, numeric ranges, and fold-training constants. Freeze
-the preprocessing contract only after this review.
+the semantic preprocessing proposal after this review, then run the separate
+fold-local preprocessing audit. That audit must verify the 103-column order,
+training-only numeric parameters and masks, finite transformed values, and row
+conservation without materializing another full packet dataset. Freeze the
+preprocessing contract only after both fold artifacts and their validation
+transform reports have been reviewed.
 
 Run both development folds with a small, predefined hyperparameter search.
 Generate one out-of-fold score per development packet and retain full

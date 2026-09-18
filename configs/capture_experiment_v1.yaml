@@ -3,7 +3,7 @@
 # Paths are relative to the repository root. Runtime reports are separate artifacts.
 manifest_version: 1
 experiment_id: capture_feasibility_v1
-status: development_feature_profile_pending
+status: development_preprocessing_runtime_validation_pending
 decision_record: docs/capture-experimental-plan.md
 dataset: cAPTure
 objective: >-
@@ -226,11 +226,13 @@ features:
   final_preprocessing_refit_scope: all_development_scenarios
   selected_columns: configs/capture_packet_schema_v1.yaml#features
   preprocessing_contract: configs/capture_preprocessing_v1.yaml
+  preprocessing_audit_notebook: code/python/notebook/capture_preprocessing.ipynb
+  preprocessing_audit_status: pending_full_dev_runtime_validation
   categorical_encoding: fixed_semantic_taxonomies_preferred_over_fold_learned_vocabularies
   tcp_port_encoding: fixed_exhaustive_roles_for_source_and_destination
   protocol_encoding: multihot_by_network_transport_and_application_layer
   missing_value_handling: nullable_in_canonical_fit_imputation_and_masks_on_training_fold_only
-  scaling: pending_full_dev_feature_profile_fit_on_training_fold_only
+  scaling: declared_per_feature_standardization_fit_on_training_fold_only
   learned_feature_selection_procedure: none_for_primary_baseline
 
 windows:

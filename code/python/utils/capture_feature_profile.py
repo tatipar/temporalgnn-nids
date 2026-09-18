@@ -34,7 +34,9 @@ def load_preprocessing_schema(path: Path, packet_schema: dict) -> dict:
     schema = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if schema.get("schema_version") != "capture_preprocessing_v1":
         raise ValueError("Unsupported cAPTure preprocessing schema version.")
-    if schema.get("status") not in {"candidate_pending_feature_profile", "frozen"}:
+    if schema.get("status") not in {
+        "candidate_pending_feature_profile", "candidate_pending_runtime_validation", "frozen",
+    }:
         raise ValueError("The preprocessing schema has an unsupported status.")
     if schema.get("canonical_packet_schema_version") != packet_schema["schema_version"]:
         raise ValueError("The preprocessing and canonical packet schemas do not match.")
@@ -317,7 +319,7 @@ def _merge_counters(counters: Iterable[Counter]) -> Counter:
 def build_fold_profiles(manifest: dict, scenario_profiles: dict[str, dict],
                         category_counts: dict[str, dict[str, Counter]],
                         preprocessing_schema: dict) -> dict[str, dict]:
-    """Summarize train-only constancy and validation categorical coverage."""
+    """Summarize raw train-only constancy and validation categorical coverage."""
     result = {}
     all_features = [
         name for role in preprocessing_schema["feature_roles"].values() for name in role
@@ -372,8 +374,13 @@ def build_fold_profiles(manifest: dict, scenario_profiles: dict[str, dict],
             "train_scenarios": train,
             "validation_scenarios": validate,
             "training_packets": train_packets,
+            "training_constant_nonmissing": sorted(constants),
             "training_constants": sorted(constants),
             "training_all_missing": sorted(all_missing),
+            "raw_constancy_semantics": (
+                "constant_nonmissing ignores null values; final encoded constants are "
+                "computed by the fold-fitted model preprocessor"
+            ),
             "feature_fit_summary": feature_fit,
             "categorical_validation_coverage": coverage,
         }

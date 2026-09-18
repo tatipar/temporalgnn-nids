@@ -39,6 +39,7 @@ class CaptureFeatureProfileTests(unittest.TestCase):
         self.assertEqual(len(assigned), 42)
         self.assertEqual(set(assigned), set(ordered_feature_names(self.packet_schema)))
         self.assertEqual(self.schema["primary_model_view"]["feature_count_after_port_encoding_only"], 62)
+        self.assertEqual(self.schema["primary_model_view"]["final_feature_count"], 103)
 
     def test_fixed_port_taxonomy_is_exhaustive_in_both_directions(self):
         ports = pd.Series([1883, 443, 22, 445, 53, 5432, 25, 49151, 49152, 0, None])

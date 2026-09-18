@@ -1,8 +1,8 @@
-# Candidate fold-local preprocessing contract for canonical cAPTure packets.
-# This file defines semantic roles and deterministic encodings. It is not
-# frozen until the FULL_DEV feature profile has been reviewed.
+# Reviewed fold-local preprocessing contract for canonical cAPTure packets.
+# The semantic encoding is fixed, but runtime validation must pass before this
+# contract is frozen for model training.
 schema_version: capture_preprocessing_v1
-status: candidate_pending_feature_profile
+status: candidate_pending_runtime_validation
 canonical_packet_schema_version: capture_packet_v1
 
 feature_roles:
@@ -101,19 +101,93 @@ protocol_encoding:
     ssh_requires_tcp: true
   raw_iana_protocol_one_hot: false
 
+binary_policy:
+  nonnullable:
+    - destination_is_broadcast
+    - destination_is_multicast
+    - is_arp
+    - is_ipv4
+    - is_ipv6
+    - is_malformed
+    - is_mqtt
+    - is_ssh
+    - is_tcp
+    - is_udp
+  nullable_fill_zero:
+    - ipv4_flag_df
+    - ipv4_flag_mf
+    - ipv6_fragment_more
+    - mqtt_duplicate_flag
+    - mqtt_retain_flag
+    - tcp_flag_ack
+    - tcp_flag_cwr
+    - tcp_flag_ece
+    - tcp_flag_fin
+    - tcp_flag_psh
+    - tcp_flag_rst
+    - tcp_flag_syn
+    - tcp_flag_urg
+
 numeric_policy:
   canonical_nulls_are_preserved: true
   fit_scope: current_fold_training_scenarios_only
-  imputation: pending_feature_profile
-  presence_indicators: pending_feature_profile
-  skew_transform: pending_feature_profile
-  scaling: pending_feature_profile
+  imputation: transformed_training_mean_then_zero_after_standardization
+  presence_indicators:
+    ipv6_fragment_header_present: ipv6_fragment_more
+    ssh_padding_length_present: ssh_padding_length
+  log1p_then_standardize:
+    - frame_length
+    - ipv4_length
+    - tcp_payload_length
+    - tcp_window_value
+  standardize:
+    - ipv4_fragment_offset
+    - ipv4_ttl
+    - ssh_padding_length
+    - tcp_header_length
+  nonnegative_required_before_log1p: true
+  zero_variance_policy: zero_in_training_and_evaluation_for_current_fold
 
 categorical_code_policy:
-  fit_scope: current_fold_training_scenarios_only
-  preferred_representation: fixed_protocol_domain_with_missing_and_other
+  fit_scope: fixed_protocol_domains_no_data_fitted_vocabulary
+  absent_representation: all_zero_with_protocol_or_message_context
   learned_top_k_vocabulary: false
-  exact_domains: pending_feature_profile
+  encodings:
+    ipv4_dscp:
+      representation: fixed_binary_bits
+      bit_count: 6
+      minimum: 0
+      maximum: 63
+      output_prefix: ipv4_dscp_bit
+    mqtt_message_type:
+      representation: fixed_one_hot
+      values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    mqtt_qos:
+      representation: fixed_one_hot
+      values: [0, 1, 2, 3]
+    mqtt_reserved_flag:
+      representation: fixed_one_hot
+      values: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    mqtt_subscription_qos:
+      representation: fixed_one_hot
+      values: [0, 1, 2, 3]
+    ssh_direction:
+      representation: fixed_one_hot
+      values: [0, 1]
+  out_of_domain_policy: error
+
+primary_exclusions:
+  ethernet_type: exactly_redundant_with_arp_ipv4_ipv6_indicators
+  mqtt_version: near_constant_and_single_invalid_value_signature
+  mqtt_connack_reason_code: extremely_sparse_with_suspicious_invalid_codes
+  tcp_source_port: replaced_by_fixed_source_port_roles
+  tcp_destination_port: replaced_by_fixed_destination_port_roles
+
+fold_variance_policy:
+  fit_scope: current_fold_training_scenarios_only
+  representation: fixed_width_output_with_zero_mask
+  apply_same_mask_to_training_and_validation: true
+  validation_may_activate_training_constant_feature: false
 
 primary_model_view:
   shared_across_models: true
@@ -121,7 +195,12 @@ primary_model_view:
   port_role_features_per_direction: 11
   canonical_feature_count: 42
   feature_count_after_port_encoding_only: 62
-  final_feature_count: null
+  direct_binary_features: 23
+  derived_presence_features: 2
+  transformed_numeric_features: 8
+  encoded_port_role_features: 22
+  encoded_categorical_features: 48
+  final_feature_count: 103
 
 profile:
   quantiles: [0.0, 0.01, 0.5, 0.99, 1.0]
