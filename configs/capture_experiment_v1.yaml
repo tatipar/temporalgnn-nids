@@ -3,7 +3,7 @@
 # Paths are relative to the repository root. Runtime reports are separate artifacts.
 manifest_version: 1
 experiment_id: capture_feasibility_v1
-status: development_xgb_p_t_ready_for_real_data
+status: development_xgb_p_t_followup_protocol_ready
 decision_record: docs/capture-experimental-plan.md
 dataset: cAPTure
 objective: >-
@@ -317,6 +317,46 @@ training:
     derived_context_artifact: source_row_id_and_14_context_fields_only
     context_artifact_provenance: prepared_packet_sha256_per_scenario
     shared_context_inputs_for_xgb_and_graph_models: true
+  xgb_p_t_ablation:
+    status: frozen_before_ablation_results
+    context_source: completed_primary_context_artifacts
+    packet_features: same_103_fold_preprocessed_features_as_xgb_p
+    model_configuration: xgb_p_depth5_primary_200_fixed_rounds
+    folds_and_scenario_class_weights: same_as_xgb_p_t_primary
+    variants:
+      full:
+        - window_packet_count
+        - source_sent_packet_count
+        - destination_received_packet_count
+        - directed_pair_packet_count
+        - source_unique_destinations
+        - destination_unique_sources
+        - window_mqtt_fraction
+        - window_mean_frame_length
+        - previous_30s_packet_count
+        - previous_30s_source_sent_packet_count
+        - previous_30s_destination_received_packet_count
+        - previous_30s_directed_pair_packet_count
+        - previous_30s_source_unique_destinations
+        - previous_30s_destination_unique_sources
+      current_window:
+        - window_packet_count
+        - source_sent_packet_count
+        - destination_received_packet_count
+        - directed_pair_packet_count
+        - source_unique_destinations
+        - destination_unique_sources
+        - window_mqtt_fraction
+        - window_mean_frame_length
+      history:
+        - previous_30s_packet_count
+        - previous_30s_source_sent_packet_count
+        - previous_30s_destination_received_packet_count
+        - previous_30s_directed_pair_packet_count
+        - previous_30s_source_unique_destinations
+        - previous_30s_destination_unique_sources
+    train_new_variants: [current_window, history]
+    reuse_existing_variants: [xgb_p, full]
   hyperparameter_search:
     xgb_p:
       policy: fixed_primary_with_optional_matched_capacity_sensitivity
@@ -401,10 +441,16 @@ evaluation:
   sequence_latency: first_detecting_window_end_minus_first_malicious_packet_timestamp
   retain_missed_sequences_explicitly: true
   threshold_selection_data: development_out_of_fold_predictions_only
-  threshold_selection_procedure: null
-  false_alert_budgets: null
-  window_alert_aggregation_rule: null
-  false_alert_exposure_definition: null
+  threshold_selection_procedure: smallest_score_threshold_whose_worst_fold_mean_false_alert_windows_per_hour_meets_budget
+  false_alert_budgets:
+    primary_per_hour: 1.0
+    sensitivity_per_hour: [0.08333333333333333, 12.0]
+  window_alert_aggregation_rule: maximum_packet_score_in_window_greater_than_or_equal_to_threshold
+  false_alert_exposure_definition: all_five_second_wall_clock_windows_from_scenario_origin_through_last_packet_excluding_windows_with_any_attack_packet_including_empty_windows
+  false_alert_rate_aggregation: mean_scenario_rates_within_each_fold_then_maximum_fold_rate_for_threshold_selection
+  threshold_tie_rule: score_greater_than_or_equal_to_threshold_with_nextafter_above_tied_negative_score
+  sequence_detection_rule: any_malicious_packet_score_above_or_equal_to_threshold_with_alert_at_window_end
+  missed_sequence_latency: last_malicious_packet_timestamp_minus_first_malicious_packet_timestamp_report_with_miss_flag
   minimum_effect_sizes_for_model_gates: null
   required_xgb_p_sanity_checks:
     - shuffled_labels
@@ -416,7 +462,7 @@ evaluation:
     - investigate_near_perfect_results
 
 readiness:
-  # Declarative requirements for future consumers; no runner enforces them yet.
+  # Runners enforce the gates they consume; later model gates remain declarative.
   gate0_passed: true
   xgb_p_sanity_gate_passed: true
   xgb_p_sanity_review:
@@ -433,6 +479,8 @@ readiness:
     gate0: verify_source_id_and_filename_for_each_requested_development_scenario
     xgb_p: resolve_data_labels_features_windows_search_sampling_and_checkpoint_policy
     xgb_p_t: pass_xgb_p_sanity_gate_and_verify_development_context_artifacts
+    xgb_p_t_ablation: reuse_verified_primary_context_and_train_only_declared_variants
+    operational_oof: verify_all_four_model_oof_artifacts_and_apply_frozen_alert_policy
     graph_models: validate_tabular_baselines_and_resolve_graph_schema_and_memory_policy
     final_test: freeze_all_primary_pipeline_and_evaluation_decisions_before_content_access
 

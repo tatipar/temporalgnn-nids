@@ -48,6 +48,28 @@ INPUT_COLUMNS = (
     "is_mqtt", "frame_length",
 )
 CONTEXT_VERSION = 1
+ABLATION_VARIANTS = {
+    "full": CONTEXT_COLUMNS,
+    "current_window": CONTEXT_COLUMNS[:8],
+    "history": CONTEXT_COLUMNS[8:],
+}
+
+
+def context_features_for_variant(manifest: dict, variant_name: str) -> tuple[str, ...]:
+    """Resolve a declared context ablation without changing feature order."""
+    validate_context_contract(manifest)
+    if variant_name not in ABLATION_VARIANTS:
+        raise ValueError(f"Undeclared XGB-P+T variant: {variant_name}")
+    policy = manifest["training"]["xgb_p_t_ablation"]
+    if (policy["status"] != "frozen_before_ablation_results"
+            or policy["train_new_variants"] != ["current_window", "history"]
+            or policy["reuse_existing_variants"] != ["xgb_p", "full"]):
+        raise ValueError("The XGB-P+T ablation policy changed.")
+    declared = policy["variants"]
+    features = ABLATION_VARIANTS[variant_name]
+    if list(features) != declared[variant_name]:
+        raise ValueError("The context ablation differs from the declared feature set.")
+    return features
 
 
 def validate_context_contract(manifest: dict) -> dict:
@@ -219,16 +241,19 @@ def _context_batches(path: Path, batch_size: int):
     yield from (batch.to_pandas() for batch in parquet.iter_batches(batch_size=batch_size))
 
 
-def fit_context_scaler(paths: list[Path], batch_size: int) -> dict:
+def fit_context_scaler(paths: list[Path], batch_size: int,
+                       feature_names: tuple[str, ...] = CONTEXT_COLUMNS) -> dict:
     """Fit log1p and standardization parameters on training scenarios only."""
+    if not feature_names or not set(feature_names) <= set(CONTEXT_COLUMNS):
+        raise ValueError("Context scaler features must be a nonempty declared subset.")
     count = 0
-    sums = np.zeros(len(CONTEXT_COLUMNS), dtype=np.float64)
+    sums = np.zeros(len(feature_names), dtype=np.float64)
     squared = np.zeros_like(sums)
-    minima = np.full(len(CONTEXT_COLUMNS), np.inf)
-    maxima = np.full(len(CONTEXT_COLUMNS), -np.inf)
+    minima = np.full(len(feature_names), np.inf)
+    maxima = np.full(len(feature_names), -np.inf)
     for path in paths:
         for batch in _context_batches(path, batch_size):
-            raw = batch[list(CONTEXT_COLUMNS)].to_numpy(dtype=np.float64)
+            raw = batch[list(feature_names)].to_numpy(dtype=np.float64)
             if not np.isfinite(raw).all() or (raw < 0).any():
                 raise ValueError("Context features must be finite and nonnegative.")
             values = np.log1p(raw)
@@ -242,13 +267,13 @@ def fit_context_scaler(paths: list[Path], batch_size: int) -> dict:
     mean = sums / count
     standard_deviation = np.sqrt(np.maximum(squared / count - np.square(mean), 0))
     standard_deviation[(standard_deviation == 0) | (minima == maxima)] = 1
-    return {"training_rows": count, "feature_names": list(CONTEXT_COLUMNS),
+    return {"training_rows": count, "feature_names": list(feature_names),
             "transform": "log1p_then_training_fold_standardization",
             "mean": mean.tolist(), "standard_deviation": standard_deviation.tolist()}
 
 
 def transform_context(batch: pd.DataFrame, scaler: dict) -> np.ndarray:
-    values = batch[list(CONTEXT_COLUMNS)].to_numpy(dtype=np.float64)
+    values = batch[scaler["feature_names"]].to_numpy(dtype=np.float64)
     if not np.isfinite(values).all() or (values < 0).any():
         raise ValueError("Context features must be finite and nonnegative.")
     result = (np.log1p(values) - scaler["mean"]) / scaler["standard_deviation"]
@@ -352,20 +377,29 @@ def validate_context_run(*, manifest_path: Path, packet_schema_path: Path,
     return _load_context_run(context_dir, manifest, reports, packet_paths)
 
 
-def validate_xgb_p_t_fold_run(directory: Path, fold: str) -> dict:
+def validate_xgb_p_t_fold_run(directory: Path, fold: str,
+                              variant_name: str = "full") -> dict:
     """Verify a persisted model, scaler, OOF files, and context provenance."""
     report = validate_xgb_p_fold_run(directory, fold, "depth5_primary")
-    if report.get("model_family") != "xgb_p_t" or report.get("feature_count") != 117:
+    if variant_name not in ABLATION_VARIANTS:
+        raise ValueError(f"Undeclared XGB-P+T variant: {variant_name}")
+    expected_family = "xgb_p_t" if variant_name == "full" else "xgb_p_t_ablation"
+    expected_features = list(ABLATION_VARIANTS[variant_name])
+    if (report.get("model_family") != expected_family
+            or report.get("variant_name", "full") != variant_name
+            or report.get("feature_count") != 103 + len(expected_features)
+            or report.get("feature_names", [])[103:] != expected_features):
         raise ValueError("Fold report does not describe the XGB-P+T model view.")
     if sha256_file(directory / report["context_scaler_artifact"]) != report["context_scaler_sha256"]:
         raise ValueError("The fold context scaler changed after training.")
     return report
 
 
-def summarize_xgb_p_t_oof(run_dir: Path) -> dict:
+def summarize_xgb_p_t_oof(run_dir: Path, variant_name: str = "full") -> dict:
     """Compute the same hierarchical development OOF summary as XGB-P."""
     reports = {
-        fold: validate_xgb_p_t_fold_run(run_dir / "depth5_primary" / f"fold_{fold}", fold)
+        fold: validate_xgb_p_t_fold_run(
+            run_dir / "depth5_primary" / f"fold_{fold}", fold, variant_name)
         for fold in ("A", "B")
     }
     if reports["A"]["context_report_sha256"] != reports["B"]["context_report_sha256"]:
@@ -432,7 +466,8 @@ def run_xgb_p_t_fold(*, manifest_path: Path, packet_schema_path: Path,
                      preprocessing_audit_dir: Path, context_dir: Path,
                      output_dir: Path, local_work_root: Path, fold: str,
                      configuration_name: str = "depth5_primary",
-                     batch_size: int = 50_000, nthread: int = 2) -> dict:
+                     batch_size: int = 50_000, nthread: int = 2,
+                     variant_name: str = "full") -> dict:
     """Train one fold using the frozen packet view plus reviewed context."""
     import xgboost as xgb
 
@@ -449,7 +484,7 @@ def run_xgb_p_t_fold(*, manifest_path: Path, packet_schema_path: Path,
             or review.get("shuffled_label_hierarchical_macro_roc_auc", 1)
             > review.get("review_line", 0.6)):
         raise ValueError("XGB-P sanity review is missing or violates the negative-control line.")
-    validate_context_contract(manifest)
+    context_feature_names = context_features_for_variant(manifest, variant_name)
     if fold not in manifest["validation"]["folds"]:
         raise ValueError(f"Undeclared development fold: {fold}")
     split = manifest["validation"]["folds"][fold]
@@ -471,13 +506,16 @@ def run_xgb_p_t_fold(*, manifest_path: Path, packet_schema_path: Path,
     training_rows = sum(int(reports[name]["counts"]["packets"]) for name in train_scenarios)
     if preprocessor.training_rows != training_rows:
         raise ValueError("Packet preprocessing was fitted on a different fold row count.")
-    scaler = fit_context_scaler([context_paths[name] for name in train_scenarios], batch_size)
+    scaler = fit_context_scaler(
+        [context_paths[name] for name in train_scenarios], batch_size,
+        context_feature_names)
     if scaler["training_rows"] != training_rows:
         raise ValueError("Context preprocessing was fitted on a different fold row count.")
     weights = scenario_class_weights(train_scenarios, reports)
-    feature_names = [*preprocessor.feature_names, *CONTEXT_COLUMNS]
-    if len(feature_names) != 117 or len(set(feature_names)) != 117:
-        raise ValueError("The XGB-P+T model view must contain 117 unique columns.")
+    feature_names = [*preprocessor.feature_names, *context_feature_names]
+    feature_count = 103 + len(context_feature_names)
+    if len(feature_names) != feature_count or len(set(feature_names)) != feature_count:
+        raise ValueError("The XGB-P+T model view has an invalid feature order.")
     local_work_root.mkdir(parents=True, exist_ok=True)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -490,12 +528,12 @@ def run_xgb_p_t_fold(*, manifest_path: Path, packet_schema_path: Path,
         capture_output=True, text=True, check=False)
     with tempfile.TemporaryDirectory(prefix="capture_xgb_p_t_", dir=local_work_root) as temporary:
         stage = Path(temporary)
-        required_bytes = training_rows * (117 * 4 + 1 + 4) + 1_000_000_000
+        required_bytes = training_rows * (feature_count * 4 + 1 + 4) + 1_000_000_000
         if shutil.disk_usage(stage).free < required_bytes:
             raise OSError("Insufficient local storage for XGB-P+T training matrix.")
         features = np.lib.format.open_memmap(
             stage / "features.npy", mode="w+", dtype=np.float32,
-            shape=(training_rows, 117))
+            shape=(training_rows, feature_count))
         labels = np.lib.format.open_memmap(
             stage / "labels.npy", mode="w+", dtype=np.uint8,
             shape=(training_rows,))
@@ -611,7 +649,10 @@ def run_xgb_p_t_fold(*, manifest_path: Path, packet_schema_path: Path,
                 "oof_artifact": path.name, "oof_sha256": sha256_file(path),
                 **_scenario_metrics(path)}
         result = {
-            "report_version": 1, "model_family": "xgb_p_t",
+            "report_version": 1,
+            "model_family": "xgb_p_t" if variant_name == "full" else "xgb_p_t_ablation",
+            "variant_name": variant_name,
+            "context_feature_names": list(context_feature_names),
             "status": "development_oof_complete_thresholds_pending",
             "fold": fold, "configuration_name": configuration_name,
             "configuration": parameters, "xgboost_parameters": xgb_parameters,

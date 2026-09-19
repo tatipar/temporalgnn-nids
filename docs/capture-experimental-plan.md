@@ -53,6 +53,16 @@ real-data context run should be
 reviewed for row counts, nonempty window counts, source-artifact checksums,
 and plausible feature ranges before the two training folds run.
 
+Development OOF update (user-reported Colab output, 2026-09-19): full XGB-P+T
+reached hierarchical macro packet ROC-AUC 0.9975545445964986, compared with
+0.9698542978982521 for XGB-P. All five scenario differences were positive;
+the largest were `dollar_char` (+0.076349) and `qos_mid` (+0.036737). The
+run artifacts and run ID are not stored in this repository, so the follow-up
+notebooks verify their Drive checksums and fold provenance before using them.
+The near-ceiling aggregate ranking motivates the predeclared context ablation
+and thresholded operational evaluation below. It does not establish that
+preceding history or learned graph structure contributed the improvement.
+
 Implementation update (2026-09-17): the initial machine-readable manifest is
 available at [capture_experiment_v1.yaml](../configs/capture_experiment_v1.yaml).
 It records the locked assignments and explicit unresolved decisions (`null`).
@@ -583,15 +593,34 @@ window close. Sequence latency is therefore:
 first_detecting_window_end - first_malicious_packet_timestamp
 ```
 
-Missed sequences must remain explicit misses rather than being removed from
-latency summaries. Operational window alerts and their aggregation rule, such
-as at least one packet score above threshold, must be frozen before final
-testing.
+Missed sequences remain explicit misses. The development OOF operational
+protocol is now fixed before running the follow-up notebooks:
 
-Thresholds and target false-alert budgets must be selected from development
-out-of-fold predictions only. Test1 and Test2 must not determine thresholds.
-Exact target budgets remain an open protocol choice and should include values
-comparable to the cAPTure paper when feasible.
+- a nonempty window alerts when its maximum packet score is at least the
+  model-specific threshold;
+- a false-alert opportunity is a five-second wall-clock window containing no
+  malicious packet, including empty windows from the scenario origin through
+  the final packet window; empty windows cannot alert;
+- the denominator is five seconds per such window, expressed in hours;
+- the primary budget is one false-alert window per hour; sensitivity budgets
+  are one per 12 hours and one per five minutes;
+- for each model and budget, choose the smallest score threshold whose worst
+  of the two fold means of per-scenario false-alert-window rates meets the
+  budget; score ties are handled by moving just above the relevant negative
+  window score;
+- an attack-step iteration is detected only when a malicious packet score
+  crosses the threshold; its detection time is that packet's window end;
+- missed iterations retain a miss flag and use their last-minus-first
+  malicious packet time in the mean duration-assigned latency summary.
+
+This uses the same human-readable false-alert frequencies as selected points
+in [the cAPTure paper](https://doi.org/10.1016/j.comnet.2026.112570), but
+counts alerting windows rather than the paper's false-positive packets. Its
+numerical FPR results are therefore not directly comparable. Thresholds are
+selected only from development OOF predictions. Test1 and Test2 do not
+determine thresholds. Scenario and fold breakdowns accompany hierarchical
+macro summaries, so repeated benign backgrounds do not let packet-rich
+scenarios determine the comparison.
 
 ## Execution plan
 
@@ -738,6 +767,20 @@ the completed prepared/preprocessing artifacts, and an explicit sanity-gate
 decision in the manifest. No new context horizon or model-selection rule is
 needed for the primary run.
 
+Follow-up ablation (frozen before ablation results): reuse XGB-P and the full
+XGB-P+T model, then train only two additional depth-5/200-round variants on
+the same two folds and prepared context artifacts. `current_window` receives
+the 103 packet columns plus the eight complete-current-window summaries;
+`history` receives the 103 packet columns plus the six preceding-30-second
+summaries. Each variant fits only its selected context columns on its current
+training fold. The implementation is in
+[capture_xgb_p_t_ablation.ipynb](../code/python/notebook/capture_xgb_p_t_ablation.ipynb).
+The separate
+[operational OOF notebook](../code/python/notebook/capture_oof_operational_evaluation.ipynb)
+uses [capture_oof_operational.py](../code/python/utils/capture_oof_operational.py)
+to compare all four models using the frozen alert protocol above. Neither
+notebook accesses held-out author-train or final-test scenarios.
+
 ### Phase 5: build graphs and run graph models
 
 Confirm the graph schema after preparation and use the predeclared five-second
@@ -859,7 +902,8 @@ final-test performance:
 3. categorical encoding and missing-value rules;
 4. candidate and selected fixed-window duration;
 5. class weighting or training-only benign subsampling;
-6. target false-alert budgets and threshold-selection procedure;
+6. target false-alert budgets and threshold-selection procedure (resolved for
+   the development OOF comparison above);
 7. graph handling for broadcast, multicast, missing endpoints, and non-IP
    packets;
 8. minimum effect sizes for proceeding through the model ladder;
@@ -884,18 +928,21 @@ Every run must record:
 - per-packet predictions with scenario, window, sequence, and timestamp keys;
 - per-chain, per-step, and aggregate metrics.
 
-## Immediate next artifacts
+## Implementation sequence and next gate
 
-The next implementation work should produce, in this order:
+The experiment proceeds in this order:
 
 1. completed Gate-0 and canonical per-scenario preparation artifacts;
 2. a fold-aware FULL_DEV feature profile and reviewed preprocessing contract;
 3. an XGB-P training and out-of-fold evaluation notebook or script (implemented;
    real-data primary folds, sampled sanity controls, and review completed);
-4. XGB-P+T feature generation and training (implemented; real-data context
-   and fold runs remain to be executed on Drive);
-5. packet-graph construction and ST-GNN adaptation only after the tabular
-   baselines are trustworthy.
+4. XGB-P+T feature generation and training (implemented; the user reported
+   completed real-data OOF results, with Drive artifacts verified by follow-up
+   consumers);
+5. current-window and history ablations followed by the operational OOF
+   evaluation (implemented; Colab execution pending);
+6. packet-graph construction and ST-GNN adaptation after the operational
+   tabular comparison and graph-memory protocol review.
 
 ## Related project documents
 
