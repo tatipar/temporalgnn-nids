@@ -1,0 +1,4 @@
+# Additional CPU dependencies for the cAPTure XGB-P training notebook.
+-r requirements-capture.txt
+xgboost>=2.0,<4
+scikit-learn>=1.5,<2

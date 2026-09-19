@@ -631,9 +631,22 @@ conservation without materializing another full packet dataset. Freeze the
 preprocessing contract only after both fold artifacts and their validation
 transform reports have been reviewed.
 
-Run both development folds with a small, predefined hyperparameter search.
-Generate one out-of-fold score per development packet and retain full
-provenance.
+Run the predeclared XGB-P depth-5 primary configuration on both development
+folds using `capture_xgb_p.ipynb`. The optional depth-10 configuration is a
+matched capacity sensitivity from the authors' published search grid, not an
+automatic replacement for the primary result. Both configurations use 200
+boosting rounds, learning rate 0.1, fold-local scenario/class weights, and
+the same frozen 103-column packet representation. The fixed number of rounds
+avoids selecting a checkpoint on the outer validation fold. Run one fold at a
+time on Colab CPU; training matrices are temporary local artifacts, while
+models, reports, and one out-of-fold score per validation packet are verified
+and retained on Drive. No threshold or final model is fitted in this phase.
+
+The depth-10 sensitivity is conditional on a resource-only CPU and memory
+check. Any change to the declared primary configuration or both-model
+comparison protocol requires a manifest revision before inspecting the
+corresponding validation metrics. Do not treat the best seed or fold-trained
+model as the final test model.
 
 Before accepting results:
 
@@ -801,7 +814,8 @@ The next implementation work should produce, in this order:
 
 1. completed Gate-0 and canonical per-scenario preparation artifacts;
 2. a fold-aware FULL_DEV feature profile and reviewed preprocessing contract;
-3. an XGB-P training and out-of-fold evaluation notebook or script;
+3. an XGB-P training and out-of-fold evaluation notebook or script (now
+   implemented; real-data training and sanity review remain pending);
 4. XGB-P+T feature generation only after XGB-P passes its sanity gate;
 5. packet-graph construction and ST-GNN adaptation only after the tabular
    baselines are trustworthy.

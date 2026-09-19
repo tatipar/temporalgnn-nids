@@ -3,7 +3,7 @@
 # Paths are relative to the repository root. Runtime reports are separate artifacts.
 manifest_version: 1
 experiment_id: capture_feasibility_v1
-status: development_xgb_p_protocol_pending
+status: development_xgb_p_training_ready
 decision_record: docs/capture-experimental-plan.md
 dataset: cAPTure
 objective: >-
@@ -284,7 +284,33 @@ training:
     - fold_boundary
   memory_policy: null
   temporal_summary_features_and_horizons: null
-  hyperparameter_search: null
+  hyperparameter_search:
+    xgb_p:
+      policy: fixed_primary_with_optional_matched_capacity_sensitivity
+      primary_configuration: depth5_primary
+      sensitivity_configuration: depth10_sensitivity
+      candidates:
+        depth5_primary:
+          max_depth: 5
+        depth10_sensitivity:
+          max_depth: 10
+      common_parameters:
+        objective: binary:logistic
+        tree_method: hist
+        device: cpu
+        num_boost_round: 200
+        learning_rate: 0.1
+        min_child_weight: 20
+        reg_lambda: 1.0
+        max_bin: 128
+        subsample: 1.0
+        colsample_bytree: 1.0
+        colsample_bylevel: 1.0
+        colsample_bynode: 1.0
+      comparison_metric: hierarchical_macro_oof_packet_roc_auc
+      checkpoint_selection: fixed_rounds_no_early_stopping
+      validation_metrics_do_not_change_primary_configuration: true
+      resource_fallback_requires_prevalidation_manifest_revision: true
   class_weighting_or_training_only_sampling:
     policy: inverse_scenario_class_frequency
     fit_scope: current_training_fold_only
@@ -293,7 +319,8 @@ training:
     xgb_application: sample_weight
     neural_application: per_edge_loss_weight
     validation_and_test_weighting: none
-  checkpoint_selection_rule: null
+  checkpoint_selection_rule:
+    xgb_p: fixed_200_boosting_rounds_no_validation_early_stopping
 
 evaluation:
   primary_selection_metric:
