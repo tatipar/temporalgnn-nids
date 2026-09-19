@@ -3,7 +3,7 @@
 # Paths are relative to the repository root. Runtime reports are separate artifacts.
 manifest_version: 1
 experiment_id: capture_feasibility_v1
-status: development_xgb_p_sanity_controls_ready
+status: development_xgb_p_t_ready_for_real_data
 decision_record: docs/capture-experimental-plan.md
 dataset: cAPTure
 objective: >-
@@ -312,6 +312,10 @@ training:
     endpoint_identity_policy: grouping_keys_only_never_model_values
     state_reset_scope: scenario_boundary
     preprocessing_fit_scope: current_training_fold_only
+    numeric_transform: log1p_then_training_fold_standardization_for_all_14_context_fields
+    zero_variance_policy: unit_scale_after_zero_variance_detection
+    derived_context_artifact: source_row_id_and_14_context_fields_only
+    context_artifact_provenance: prepared_packet_sha256_per_scenario
     shared_context_inputs_for_xgb_and_graph_models: true
   hyperparameter_search:
     xgb_p:
@@ -350,6 +354,7 @@ training:
     validation_and_test_weighting: none
   checkpoint_selection_rule:
     xgb_p: fixed_200_boosting_rounds_no_validation_early_stopping
+    xgb_p_t: fixed_200_boosting_rounds_no_validation_early_stopping
 
   xgb_p_sanity_controls:
     shuffled_training_labels:
@@ -413,12 +418,21 @@ evaluation:
 readiness:
   # Declarative requirements for future consumers; no runner enforces them yet.
   gate0_passed: true
-  xgb_p_sanity_gate_passed: false
+  xgb_p_sanity_gate_passed: true
+  xgb_p_sanity_review:
+    decision: pass_for_xgb_p_t_development_training
+    reviewed_on: '2026-09-19'
+    baseline_run_id: 20260919T151844_852400Z_xgb_p
+    sanity_run_id: 20260919T184528_784079Z_xgb_p_sanity
+    hierarchical_macro_oof_packet_roc_auc: 0.9698542978982521
+    shuffled_label_hierarchical_macro_roc_auc: 0.4998326345817774
+    review_line: 0.6
+    limitation: strong_mqtt_protocol_prevalence_shortcut_and_weaker_mqtt_subgroup_ranking
   final_pipeline_frozen: false
   requirements:
     gate0: verify_source_id_and_filename_for_each_requested_development_scenario
     xgb_p: resolve_data_labels_features_windows_search_sampling_and_checkpoint_policy
-    xgb_p_t: pass_xgb_p_sanity_gate_and_resolve_summary_features_and_horizons
+    xgb_p_t: pass_xgb_p_sanity_gate_and_verify_development_context_artifacts
     graph_models: validate_tabular_baselines_and_resolve_graph_schema_and_memory_policy
     final_test: freeze_all_primary_pipeline_and_evaluation_decisions_before_content_access
 

@@ -27,6 +27,32 @@ Status as of 2026-09-18:
 - fold-aware feature profiling and preprocessing review are next;
 - no cAPTure classifier has been trained yet.
 
+Implementation update (2026-09-19): the primary depth-5 XGB-P development run
+completed both folds. Its hierarchical macro OOF packet ROC-AUC is
+0.9698542978982521. The sampled shuffled-label control returned
+0.4998326345817774, below its 0.6 investigation line. The per-fold feature
+importance, single-feature ranking, and MQTT-stratified OOF results identify a
+strong protocol-prevalence shortcut: `is_mqtt` is the top gain-ranked feature
+in both folds, while MQTT-only ROC-AUC is 0.685 for `dollar_char` and 0.718
+for `qos_mid`. The strong aggregate result is therefore not uniform across
+traffic groups or attack steps. The reviewed packet view excludes endpoint
+identities; preprocessing was fitted on fold-training scenarios only. No
+evidence from these controls requires stopping the next development
+comparison. The XGB-P sanity gate is recorded as passed for XGB-P+T training,
+with the protocol shortcut retained as an interpretation limit. This decision
+does not approve test access or a final detection claim. The prepared data,
+fold preprocessing audit, model, and OOF outputs are on Drive, not in this
+repository. The notebook display alone does not verify their current
+availability or checksums; the runners validate those artifacts when used.
+
+The XGB-P+T implementation is now in
+[capture_xgb_p_t.py](../code/python/utils/capture_xgb_p_t.py) and
+[capture_xgb_p_t.ipynb](../code/python/notebook/capture_xgb_p_t.ipynb).
+The training runner enforces the documented sanity decision. The first
+real-data context run should be
+reviewed for row counts, nonempty window counts, source-artifact checksums,
+and plausible feature ranges before the two training folds run.
+
 Implementation update (2026-09-17): the initial machine-readable manifest is
 available at [capture_experiment_v1.yaml](../configs/capture_experiment_v1.yaml).
 It records the locked assignments and explicit unresolved decisions (`null`).
@@ -691,6 +717,27 @@ comparisons. A static GNN with these fields has explicit temporal input but
 no learned recurrent memory; a temporal GNN with them has both. An unassisted
 temporal GNN remains a separate representation-learning comparison.
 
+For the first XGB-P+T run, all 14 nonnegative context fields receive a fixed
+`log1p` transform followed by mean/standard-deviation normalization fitted
+only on the current fold's training scenarios. Zero-variance fields use unit
+scale. Context artifacts contain only source-row IDs and the 14 derived
+fields. They are generated separately for each scenario from timestamp,
+Ethernet endpoint keys, MQTT indicator, and frame length; labels and attack
+metadata are never read by the context generator. A complete current window
+is scored at its close. The preceding 30-second history consists of six
+wall-clock windows, including empty windows as zero contribution. Distinct
+peers are counted over the union of that history. Context state resets for
+each scenario. Training joins context and packets by verified source-row ID.
+
+The XGB-P+T primary model uses the XGB-P depth-5, 200-round configuration,
+scenario/class weights, and folds. Its 117 ordered inputs are the existing
+103 packet columns followed by the 14 context fields. Context preprocessing
+is saved per fold. The same hierarchical macro OOF ROC-AUC is reported before
+any threshold or final-test evaluation. A real-data run requires Drive access,
+the completed prepared/preprocessing artifacts, and an explicit sanity-gate
+decision in the manifest. No new context horizon or model-selection rule is
+needed for the primary run.
+
 ### Phase 5: build graphs and run graph models
 
 Confirm the graph schema after preparation and use the predeclared five-second
@@ -843,9 +890,10 @@ The next implementation work should produce, in this order:
 
 1. completed Gate-0 and canonical per-scenario preparation artifacts;
 2. a fold-aware FULL_DEV feature profile and reviewed preprocessing contract;
-3. an XGB-P training and out-of-fold evaluation notebook or script (now
-   implemented; real-data training and sanity review remain pending);
-4. XGB-P+T feature generation only after XGB-P passes its sanity gate;
+3. an XGB-P training and out-of-fold evaluation notebook or script (implemented;
+   real-data primary folds, sampled sanity controls, and review completed);
+4. XGB-P+T feature generation and training (implemented; real-data context
+   and fold runs remain to be executed on Drive);
 5. packet-graph construction and ST-GNN adaptation only after the tabular
    baselines are trustworthy.
 
