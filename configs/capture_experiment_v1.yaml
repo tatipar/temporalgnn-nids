@@ -3,7 +3,7 @@
 # Paths are relative to the repository root. Runtime reports are separate artifacts.
 manifest_version: 1
 experiment_id: capture_feasibility_v1
-status: development_xgb_p_training_ready
+status: development_xgb_p_sanity_controls_ready
 decision_record: docs/capture-experimental-plan.md
 dataset: cAPTure
 objective: >-
@@ -283,7 +283,36 @@ training:
     - validation_or_test_pass_start
     - fold_boundary
   memory_policy: null
-  temporal_summary_features_and_horizons: null
+  temporal_summary_features_and_horizons:
+    status: frozen_for_xgb_p_t_implementation
+    source: canonical_packets_without_labels_or_evaluation_metadata
+    window_width_seconds: 5
+    current_window_scope: complete_half_open_window_available_at_window_end
+    current_window_features:
+      - window_packet_count
+      - source_sent_packet_count
+      - destination_received_packet_count
+      - directed_pair_packet_count
+      - source_unique_destinations
+      - destination_unique_sources
+      - window_mqtt_fraction
+      - window_mean_frame_length
+    history_window_count: 6
+    history_seconds: 30
+    history_scope: six_complete_preceding_wall_clock_windows_excluding_current
+    history_features:
+      - previous_30s_packet_count
+      - previous_30s_source_sent_packet_count
+      - previous_30s_destination_received_packet_count
+      - previous_30s_directed_pair_packet_count
+      - previous_30s_source_unique_destinations
+      - previous_30s_destination_unique_sources
+    unique_peer_rule: count_distinct_over_entire_horizon_not_sum_of_window_counts
+    empty_history_value: 0
+    endpoint_identity_policy: grouping_keys_only_never_model_values
+    state_reset_scope: scenario_boundary
+    preprocessing_fit_scope: current_training_fold_only
+    shared_context_inputs_for_xgb_and_graph_models: true
   hyperparameter_search:
     xgb_p:
       policy: fixed_primary_with_optional_matched_capacity_sensitivity
@@ -321,6 +350,28 @@ training:
     validation_and_test_weighting: none
   checkpoint_selection_rule:
     xgb_p: fixed_200_boosting_rounds_no_validation_early_stopping
+
+  xgb_p_sanity_controls:
+    shuffled_training_labels:
+      selection_rule: source_row_id_modulo_100_equals_zero
+      sample_modulus: 100
+      permutation_scope: within_each_sampled_training_scenario
+      permutation_seed: 142
+      model_configuration: depth5_primary
+      validation_labels: original_unshuffled
+      review_if_hierarchical_macro_roc_auc_above: 0.6
+      purpose: negative_control_not_model_selection
+    single_feature_diagnostics:
+      features:
+        - is_mqtt
+        - tcp_destination_port_role_mqtt_messaging
+        - frame_length
+        - is_arp
+        - destination_is_multicast
+        - tcp_flag_ack
+        - mqtt_qos_0
+      report: per_validation_scenario_univariate_roc_auc_and_best_direction_strength
+      purpose: shortcut_review_not_feature_selection
 
 evaluation:
   primary_selection_metric:

@@ -656,11 +656,40 @@ Before accepting results:
 - report both folds and every chain separately;
 - investigate any near-perfect result before proceeding.
 
+The XGB-P sanity notebook uses a deterministic one-in-100 source-row sample
+from each development scenario for a negative control. It permutes sampled
+training labels separately inside each training scenario, preserves class
+counts, fits the same depth-5/200-round model using the already audited
+fold-local preprocessor, and evaluates sampled held-out rows against their
+original labels. This is a deliberately inexpensive pipeline check, not a
+replacement for full-data validation. A hierarchical macro ROC-AUC above 0.6
+requires investigation; a value near 0.5 is reassuring but cannot rule out
+all leakage. The same notebook reports univariate ROC-AUC diagnostics for a
+fixed set of current-packet features highlighted by the primary model. Their
+best-direction scores are descriptive, not eligible for model selection.
+They measure a single feature's scalar ranking only; a nonlinear one-feature
+tree could behave differently.
+
 ### Phase 4: train XGB-P+T
 
 Implement only causal or window-close-available summaries. Use the same folds,
 base packet features, packet targets, and decision times as XGB-P. Compare
 against XGB-P using out-of-fold predictions and the same alert budgets.
+
+The initial context contract adds eight complete-current-window summaries and
+six summaries over the union of the six preceding five-second wall-clock
+windows (30 seconds): 14 context fields in addition to the 103 packet-model
+columns before any fold-local context preprocessing. The historical summaries
+exclude the current window;
+distinct peers are recomputed over the entire horizon rather than summed
+across windows. Missing history is zero. Raw endpoint identities are grouping
+keys only, never model values. Summary computation resets at scenario
+boundaries and uses no labels, attack annotations, or evaluation metadata.
+Numeric preprocessing is fitted on each training fold only. The same derived
+context fields must be available to graph models for matched-input
+comparisons. A static GNN with these fields has explicit temporal input but
+no learned recurrent memory; a temporal GNN with them has both. An unassisted
+temporal GNN remains a separate representation-learning comparison.
 
 ### Phase 5: build graphs and run graph models
 
