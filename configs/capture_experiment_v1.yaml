@@ -3,7 +3,7 @@
 # Paths are relative to the repository root. Runtime reports are separate artifacts.
 manifest_version: 1
 experiment_id: capture_feasibility_v1
-status: development_preprocessing_runtime_validation_pending
+status: development_xgb_p_protocol_pending
 decision_record: docs/capture-experimental-plan.md
 dataset: cAPTure
 objective: >-
@@ -227,7 +227,9 @@ features:
   selected_columns: configs/capture_packet_schema_v1.yaml#features
   preprocessing_contract: configs/capture_preprocessing_v1.yaml
   preprocessing_audit_notebook: code/python/notebook/capture_preprocessing.ipynb
-  preprocessing_audit_status: pending_full_dev_runtime_validation
+  preprocessing_audit_status: approved_full_dev_runtime_validation
+  preprocessing_audit_run_id: 20260919T004143_161396Z_preprocessing
+  preprocessing_audit_notebook_commit: b9962d2
   categorical_encoding: fixed_semantic_taxonomies_preferred_over_fold_learned_vocabularies
   tcp_port_encoding: fixed_exhaustive_roles_for_source_and_destination
   protocol_encoding: multihot_by_network_transport_and_application_layer

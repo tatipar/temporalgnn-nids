@@ -87,7 +87,12 @@ def load_preprocessing_schema(path: Path, packet_schema: dict) -> dict:
 
 
 def preprocessing_schema_sha256(schema: dict) -> str:
-    encoded = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # Governance status does not change feature semantics. Keep artifacts fitted
+    # under the audited candidate contract compatible with its frozen version.
+    contract = dict(schema)
+    if contract.get("status") == "frozen":
+        contract["status"] = "candidate_pending_runtime_validation"
+    encoded = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 

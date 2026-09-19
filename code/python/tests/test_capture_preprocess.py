@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import unittest
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from utils.capture_feature_profile import load_preprocessing_schema
+from utils.capture_feature_profile import (
+    load_preprocessing_schema,
+    preprocessing_schema_sha256,
+)
 from utils.capture_preprocess import (
     CaptureFoldPreprocessor,
     model_feature_names,
@@ -112,6 +116,24 @@ class CapturePreprocessTests(unittest.TestCase):
         artifact = fitted.to_dict(fold="A", training_scenarios=["train_a"])
         restored = CaptureFoldPreprocessor.from_dict(self.schema, artifact)
         pd.testing.assert_frame_equal(fitted.transform(frame), restored.transform(frame))
+
+    def test_frozen_status_preserves_audited_artifact_compatibility(self):
+        audited = deepcopy(self.schema)
+        audited["status"] = "candidate_pending_runtime_validation"
+        frozen = deepcopy(audited)
+        frozen["status"] = "frozen"
+        self.assertEqual(
+            preprocessing_schema_sha256(audited), preprocessing_schema_sha256(frozen),
+        )
+        artifact = CaptureFoldPreprocessor(audited).fit([self.frame()]).to_dict(
+            fold="A", training_scenarios=["train_a"],
+        )
+        restored = CaptureFoldPreprocessor.from_dict(frozen, artifact)
+        self.assertEqual(restored.feature_names, model_feature_names(frozen))
+        changed = deepcopy(frozen)
+        changed["port_encoding"]["roles"]["mqtt_messaging"][1] = 8884
+        with self.assertRaisesRegex(ValueError, "contract differ"):
+            CaptureFoldPreprocessor.from_dict(changed, artifact)
 
     def test_fixed_domains_reject_invalid_values(self):
         frame = self.frame()

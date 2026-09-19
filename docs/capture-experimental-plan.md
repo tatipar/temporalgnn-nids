@@ -414,6 +414,17 @@ appears only in validation therefore cannot activate an untrained neural input
 weight. The fixed protocol-domain encoders themselves do not learn a vocabulary
 from either partition.
 
+The FULL_DEV preprocessing audit in
+`capture_gate0/preprocessing_runs/20260919T004143_161396Z_preprocessing`
+completed both folds. The committed notebook at `b9962d2` records 103 output
+columns and full row conservation in all five scenarios per fold, with no
+non-finite transformed values. Fold A retains 89 active columns and masks 14;
+Fold B retains 92 and masks 11. The maximum absolute transformed values are
+4.35 and 4.77 respectively. This approves the packet preprocessing contract,
+not the XGB-P training protocol or the final study pipeline. The artifact
+contract hash excludes only the administrative transition from audited
+candidate to frozen status, so the two saved fold preprocessors remain valid.
+
 Positive packet-length and TCP-window magnitudes use `log1p` followed by
 fold-training standardization. TTL, SSH padding length, and TCP header length
 use fold-training standardization directly. IPv4 fragment offset uses `log1p`

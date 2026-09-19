@@ -1,8 +1,7 @@
 # Reviewed fold-local preprocessing contract for canonical cAPTure packets.
-# The semantic encoding is fixed, but runtime validation must pass before this
-# contract is frozen for model training.
+# Audited on FULL_DEV in the 20260919T004143_161396Z_preprocessing run.
 schema_version: capture_preprocessing_v1
-status: candidate_pending_runtime_validation
+status: frozen
 canonical_packet_schema_version: capture_packet_v1
 
 feature_roles:
