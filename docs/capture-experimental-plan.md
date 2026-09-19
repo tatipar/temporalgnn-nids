@@ -414,6 +414,13 @@ appears only in validation therefore cannot activate an untrained neural input
 weight. The fixed protocol-domain encoders themselves do not learn a vocabulary
 from either partition.
 
+Positive packet-length and TCP-window magnitudes use `log1p` followed by
+fold-training standardization. TTL, SSH padding length, and TCP header length
+use fold-training standardization directly. IPv4 fragment offset uses `log1p`
+without standardization: the development profile is overwhelmingly zero, so
+division by its small fold standard deviation would turn the observed offset
+of two into a value above 45 and create an avoidable neural-input outlier.
+
 Validation may choose among predefined feature procedures or values such as
 `top_k`. It must not participate in fitting the selector being evaluated.
 After the procedure is selected, it may be refit on all five development

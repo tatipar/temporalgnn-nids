@@ -131,7 +131,7 @@ binary_policy:
 numeric_policy:
   canonical_nulls_are_preserved: true
   fit_scope: current_fold_training_scenarios_only
-  imputation: transformed_training_mean_then_zero_after_standardization
+  imputation: transformed_training_mean_for_standardized_features_zero_for_unscaled_features
   presence_indicators:
     ipv6_fragment_header_present: ipv6_fragment_more
     ssh_padding_length_present: ssh_padding_length
@@ -140,8 +140,9 @@ numeric_policy:
     - ipv4_length
     - tcp_payload_length
     - tcp_window_value
-  standardize:
+  log1p_without_scaling:
     - ipv4_fragment_offset
+  standardize:
     - ipv4_ttl
     - ssh_padding_length
     - tcp_header_length

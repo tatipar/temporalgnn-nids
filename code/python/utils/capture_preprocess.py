@@ -111,14 +111,18 @@ def validate_model_preprocessing_schema(schema: dict) -> list[str]:
         raise ValueError("Primary exclusions do not match the reviewed feature contract.")
     numeric = set(roles["numeric_magnitude"])
     numeric_policy = schema["numeric_policy"]
-    transformed = (
-        set(numeric_policy["log1p_then_standardize"])
-        | set(numeric_policy["standardize"])
+    transform_groups = [
+        set(numeric_policy["log1p_then_standardize"]),
+        set(numeric_policy["log1p_without_scaling"]),
+        set(numeric_policy["standardize"]),
+    ]
+    transformed = set().union(*transform_groups)
+    overlaps = any(
+        transform_groups[left] & transform_groups[right]
+        for left in range(len(transform_groups))
+        for right in range(left + 1, len(transform_groups))
     )
-    if transformed != numeric or (
-        set(numeric_policy["log1p_then_standardize"])
-        & set(numeric_policy["standardize"])
-    ):
+    if transformed != numeric or overlaps:
         raise ValueError("Every numeric magnitude must have exactly one transform.")
     presence_sources = set(numeric_policy["presence_indicators"].values())
     if not presence_sources <= set(roles["binary"] + roles["numeric_magnitude"]):
@@ -191,7 +195,10 @@ class CaptureFoldPreprocessor:
         for output, source in self.schema["numeric_policy"]["presence_indicators"].items():
             result[output] = frame[source].notna().astype("float32")
 
-        log_features = set(self.schema["numeric_policy"]["log1p_then_standardize"])
+        log_features = (
+            set(self.schema["numeric_policy"]["log1p_then_standardize"])
+            | set(self.schema["numeric_policy"]["log1p_without_scaling"])
+        )
         for name in self.numeric_features:
             parsed = _parse_nullable_numeric(frame[name], name)
             if name in log_features:
@@ -277,17 +284,25 @@ class CaptureFoldPreprocessor:
             count = counts[name]
             variance = m2[name] / count if count else 0.0
             standard_deviation = float(np.sqrt(max(variance, 0.0)))
-            transform = (
-                "log1p_standardize"
-                if name in self.schema["numeric_policy"]["log1p_then_standardize"]
-                else "standardize"
-            )
+            if name in self.schema["numeric_policy"]["log1p_then_standardize"]:
+                transform = "log1p_standardize"
+                centering_value = means[name] if count else 0.0
+                scaling_divisor = standard_deviation if standard_deviation > 0.0 else 1.0
+            elif name in self.schema["numeric_policy"]["log1p_without_scaling"]:
+                transform = "log1p_no_scaling"
+                centering_value = 0.0
+                scaling_divisor = 1.0
+            else:
+                transform = "standardize"
+                centering_value = means[name] if count else 0.0
+                scaling_divisor = standard_deviation if standard_deviation > 0.0 else 1.0
             self.numeric_parameters[name] = {
                 "transform": transform,
                 "training_nonnull": count,
                 "training_mean": means[name] if count else 0.0,
                 "training_standard_deviation": standard_deviation,
-                "scaling_divisor": standard_deviation if standard_deviation > 0.0 else 1.0,
+                "centering_value": centering_value,
+                "scaling_divisor": scaling_divisor,
             }
 
         active = []
@@ -320,7 +335,7 @@ class CaptureFoldPreprocessor:
         result = self._encode_unscaled(frame)
         for name, parameters in self.numeric_parameters.items():
             values = result[name].to_numpy(dtype=np.float64)
-            values = (values - float(parameters["training_mean"])) / float(
+            values = (values - float(parameters["centering_value"])) / float(
                 parameters["scaling_divisor"]
             )
             result[name] = np.nan_to_num(values, nan=0.0).astype("float32")

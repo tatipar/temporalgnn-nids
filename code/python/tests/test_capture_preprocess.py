@@ -81,6 +81,18 @@ class CapturePreprocessTests(unittest.TestCase):
         self.assertTrue(transformed.loc[0, "tcp_destination_port_role_mqtt_messaging"] == 1.0)
         self.assertEqual(transformed.loc[1, "ssh_padding_length_present"], 1.0)
 
+    def test_fragment_offset_uses_bounded_log_without_standardization(self):
+        frame = self.frame()
+        preprocessor = CaptureFoldPreprocessor(self.schema).fit([frame])
+        transformed = preprocessor.transform(frame)
+        parameters = preprocessor.numeric_parameters["ipv4_fragment_offset"]
+        self.assertEqual(parameters["transform"], "log1p_no_scaling")
+        self.assertEqual(parameters["centering_value"], 0.0)
+        self.assertEqual(parameters["scaling_divisor"], 1.0)
+        self.assertAlmostEqual(
+            transformed.loc[1, "ipv4_fragment_offset"], np.log1p(1.0), places=6,
+        )
+
     def test_validation_does_not_change_fit_or_activate_masked_columns(self):
         frame = self.frame()
         train = frame.iloc[:2].copy()
