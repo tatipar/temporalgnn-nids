@@ -153,7 +153,7 @@ def _chain_metrics(items: list[dict], terminal_steps: list[str],
         "chain_first_malicious_packet_ns": onset,
         "terminal_action_first_malicious_packet_ns": terminal_onset,
         "preterminal_opportunity_seconds": (
-            terminal_onset - onset) / NANOSECONDS_PER_SECOND),
+            terminal_onset - onset) / NANOSECONDS_PER_SECOND,
         "first_correct_alert_ns": first_alert,
         "first_correct_alert_steps": first_alert_steps,
         "score_positive_chain": first_alert is not None,
