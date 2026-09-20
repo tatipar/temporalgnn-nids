@@ -1,0 +1,16 @@
+# Development-only timing audit of an existing operational OOF report.
+# Terminal actions follow the cAPTure attack-step definitions and must remain
+# fixed before using this audit on final-test scenarios.
+audit_version: 1
+scope: development_oof_only
+step_timely_rule: first_correct_window_alert_strictly_before_last_malicious_packet
+chain_onset_rule: first_malicious_packet_in_scenario
+terminal_onset_rule: first_malicious_packet_of_any_declared_terminal_action_step
+chain_early_rule: first_correct_window_alert_strictly_before_terminal_onset
+first_correct_alert_rule: earliest_window_end_with_a_score_positive_malicious_packet
+terminal_action_steps:
+  train_dollar_char: [dollar_char]
+  train_slash_char: [slash_char]
+  train_sub_exf: [scp_exf]
+  train_empty_conn: [empty_conn, empty_conn_ddos]
+  train_qos_mid: [qos_mid, qos_mid_ddos]

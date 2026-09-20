@@ -13,7 +13,7 @@ It is to test, without data leakage, whether temporal and/or structural context
 provides useful and earlier attack-chain detection than current-packet
 features alone.
 
-Status as of 2026-09-18:
+Status as of 2026-09-20:
 
 - benign-background provenance has been audited from the authors' notebooks;
 - the development, Test1, and Test2 attack-chain assignments are fixed;
@@ -24,8 +24,10 @@ Status as of 2026-09-18:
 - the primary graph window is fixed at five seconds before model results;
 - the SMOKE and five-scenario FULL_DEV audits completed without automatic
   data-integrity blockers;
-- fold-aware feature profiling and preprocessing review are next;
-- no cAPTure classifier has been trained yet.
+- fold-aware feature profiling and preprocessing review completed;
+- XGB-P, full XGB-P+T, and both context ablations completed development OOF runs;
+- the thresholded development OOF comparison completed; its step-timeliness
+  interpretation requires an audit before graph-model training.
 
 Implementation update (2026-09-19): the primary depth-5 XGB-P development run
 completed both folds. Its hierarchical macro OOF packet ROC-AUC is
@@ -62,6 +64,75 @@ notebooks verify their Drive checksums and fold provenance before using them.
 The near-ceiling aggregate ranking motivates the predeclared context ablation
 and thresholded operational evaluation below. It does not establish that
 preceding history or learned graph structure contributed the improvement.
+
+Development follow-up (user-reported Colab output, 2026-09-20): the
+`current_window` and `history` ablations reached hierarchical macro OOF packet
+ROC-AUC 0.998623 and 0.998556, respectively, versus 0.997555 for the
+predeclared `full` variant. The ablation run ID is
+`20260920T000745_916321Z_xgb_p_t_ablation`. The operational evaluation used
+the declared one-false-alert-window-per-hour budget and model-specific
+thresholds selected from development OOF predictions:
+
+| Model | Macro false-alert windows/hour | Macro score-positive attack-step iterations | Macro packet recall | Mean duration-assigned latency, seconds |
+|---|---:|---:|---:|---:|
+| XGB-P | 0.209 | 0.529 | 0.600 | 63.81 |
+| Current window | 0.658 | 0.910 | 0.827 | 2.76 |
+| History | 0.919 | 0.985 | 0.816 | 3.08 |
+| Full XGB-P+T | 0.433 | 0.845 | 0.771 | 5.91 |
+
+The worst fold mean false-alert rate was below one per hour for all four
+models; this constraint does not require every scenario rate to be below one.
+At the tighter one-per-12-hours budget, `history` had qualifying scores in
+0.861 of iterations and `full` in 0.827. The `history` model had qualifying
+scores in 306/335 iterations in `train_sub_exf`, versus 206/335 for `full`,
+and all iterations in
+`train_dollar_char`, `train_empty_conn`, and `train_qos_mid`. Its weakest
+listed attack step was `mqtt_cat` in `train_sub_exf` (8/27). The `full` model
+had qualifying scores in only 6/117 `scp_exf` iterations in that scenario.
+These are development diagnostics, not final-test performance claims.
+
+The `history` variant is the strongest observed score-positive iteration
+comparator at the primary one-per-hour budget. Its 0.919 false-alert
+windows/hour exceeds the
+0.433 rate of `full`, but both satisfy that budget. At the tighter
+one-per-12-hours budget, both reported 0.036 false-alert windows/hour and
+`history` still had higher iteration detection (0.861 versus 0.827). This
+does not establish dominance at every possible false-alert rate. `Full`
+remains the originally predeclared XGB-P+T reference, not an automatic choice
+for final deployment. The operational results make `history` the development
+candidate to beat; any change to the final-model selection rule must be
+recorded before Test1 or Test2 is accessed. Graph-model development should
+compare against both after the timeliness audit. The results motivate
+matched-input neural/graph baselines; they do not by themselves establish a
+benefit from learned topology or
+recurrent memory. Thresholds and the metrics above use the same development
+OOF predictions, so the operational estimates can be optimistic. Preserve
+Test1 and Test2 for evaluation after the graph protocol and model choices are
+frozen. The reported latency summary assigns each missed iteration its
+last-minus-first malicious-packet duration; interpret it alongside detection
+rate and the explicit miss flags, not as detection time for missed attacks.
+The current iteration rule counts any qualifying malicious-packet score,
+including one whose alert becomes available at the five-second window close
+after the iteration's last malicious packet. Thus the displayed iteration
+rates do not establish detection before an attack step completes. Audit the
+stored per-iteration alert and final-packet timestamps before interpreting
+these results as early warning, especially for subsecond steps. A chain-level
+first-warning deadline relative to a declared terminal step is also needed
+for a claim about early detection of an attack chain.
+
+The development-only audit is implemented in
+[capture_oof_early_warning_audit.ipynb](../code/python/notebook/capture_oof_early_warning_audit.ipynb)
+and [capture_early_warning.py](../code/python/utils/capture_early_warning.py).
+It consumes the completed operational JSON report and keeps its model-specific
+OOF thresholds. The separate
+[early-warning policy](../configs/capture_early_warning_audit_v1.yaml)
+declares the observable terminal action steps for the five development
+scenarios. An iteration is timely only when its first correct window-close
+alert strictly precedes its last malicious packet. A scenario's first correct
+chain alert is early only when it strictly precedes the first malicious packet
+of any declared terminal action. The latter is one descriptive observation
+per scenario, not an independent sample of attack campaigns. This audit
+does not reopen packet predictions, retrain, or access final-test scenarios.
 
 Implementation update (2026-09-17): the initial machine-readable manifest is
 available at [capture_experiment_v1.yaml](../configs/capture_experiment_v1.yaml).
@@ -380,8 +451,10 @@ The following fields are for grouping, ordering, or evaluation only:
 
 Endpoint identifiers are required to construct graph topology, but raw IP or
 MAC identities are not primary packet or node features. Otherwise a model may
-memorize attacker, victim, or scenario identities. The exact stable endpoint
-key, such as IP, MAC, or another device identifier, remains a Gate-0 decision.
+memorize attacker, victim, or scenario identities. The manifest now selects
+normalized Ethernet MAC addresses as stable endpoint keys and specifies
+group-address and non-IP handling. Verify this contract in the cAPTure graph
+builder before model training.
 
 A separately labeled identity-feature ablation may be run later, but it must
 not replace the identity-free primary result.
@@ -897,7 +970,7 @@ declared before final testing.
 The following items must be resolved from development data without consulting
 final-test performance:
 
-1. stable node identifier: IP, MAC, or another device key;
+1. stable node identifier (resolved in the manifest as normalized Ethernet MAC);
 2. exact base packet feature schema;
 3. categorical encoding and missing-value rules;
 4. candidate and selected fixed-window duration;
@@ -905,7 +978,7 @@ final-test performance:
 6. target false-alert budgets and threshold-selection procedure (resolved for
    the development OOF comparison above);
 7. graph handling for broadcast, multicast, missing endpoints, and non-IP
-   packets;
+   packets (resolved in the manifest; implementation verification pending);
 8. minimum effect sizes for proceeding through the model ladder;
 9. final ST-GNN memory policy and limited hyperparameter search;
 10. whether data-level benign-source signature verification is necessary.
@@ -940,9 +1013,13 @@ The experiment proceeds in this order:
    completed real-data OOF results, with Drive artifacts verified by follow-up
    consumers);
 5. current-window and history ablations followed by the operational OOF
-   evaluation (implemented; Colab execution pending);
-6. packet-graph construction and ST-GNN adaptation after the operational
-   tabular comparison and graph-memory protocol review.
+   evaluation (user-reported Colab execution completed; development results
+   recorded above);
+6. audit whether window-close alerts precede attack-step endings and define
+   chain-level first-warning deadlines; then construct packet graphs and
+   matched-input neural/graph baselines, comparing with both the predeclared
+   full XGB-P+T model and the stronger
+   observed history ablation before adapting the ST-GNN.
 
 ## Related project documents
 
