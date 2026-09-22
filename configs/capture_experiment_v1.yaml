@@ -384,6 +384,33 @@ training:
       checkpoint_selection: fixed_rounds_no_early_stopping
       validation_metrics_do_not_change_primary_configuration: true
       resource_fallback_requires_prevalidation_manifest_revision: true
+    mlp_screen_v1:
+      status: frozen_for_one_seed_development_screen
+      variants: [packet, history]
+      architecture: simple_mlp
+      hidden_dim: 64
+      hidden_layers: 2
+      normalization: layer_norm
+      activation: relu
+      dropout: 0.2
+      optimizer: adamw
+      learning_rate: 0.001
+      weight_decay: 0.00001
+      fixed_epochs: 10
+      training_batch_size: 16384
+      shuffle_block_rows: 262144
+      materialization_batch_size: 50000
+      inference_batch_size: 50000
+      seed: 42
+      checkpoint_selection: fixed_final_epoch_no_outer_validation_early_stopping
+      loss: per_packet_binary_cross_entropy_times_fold_local_scenario_class_weight
+      loss_normalization: sum_weighted_loss_divided_by_sum_batch_weights
+      packet_variant_features: same_103_fold_preprocessed_features_as_xgb_p
+      history_variant_features: packet_variant_plus_six_preceding_30_second_features
+      primary_decision_time: window_end
+      secondary_native_decision_time: packet_timestamp
+      device: cuda
+      purpose: engineering_screen_before_graph_construction
   class_weighting_or_training_only_sampling:
     policy: inverse_scenario_class_frequency
     fit_scope: current_training_fold_only

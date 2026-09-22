@@ -856,6 +856,15 @@ notebook accesses held-out author-train or final-test scenarios.
 
 ### Phase 5: build graphs and run graph models
 
+Before constructing graph artifacts, run the matched packet MLP screen in
+[capture_mlp_training.ipynb](../code/python/notebook/capture_mlp_training.ipynb).
+The `MLP-P` variant receives the same 103 fold-preprocessed packet features as
+XGB-P. The `MLP-History` variant adds only the six causal preceding-30-second
+features. Both variants use the same two outer folds, scenario/class weights,
+one declared seed, fixed epoch count, OOF threshold selection, and operational
+budgets. This screen distinguishes the value of the engineered causal history
+from the value of tree learning before graph structure is introduced.
+
 Confirm the graph schema after preparation and use the predeclared five-second
 window. Build exactly one graph per fixed window and verify a one-to-one
 correspondence between canonical packet records, graph edges, labels, and model
@@ -1015,11 +1024,12 @@ The experiment proceeds in this order:
 5. current-window and history ablations followed by the operational OOF
    evaluation (user-reported Colab execution completed; development results
    recorded above);
-6. audit whether window-close alerts precede attack-step endings and define
-   chain-level first-warning deadlines; then construct packet graphs and
-   matched-input neural/graph baselines, comparing with both the predeclared
-   full XGB-P+T model and the stronger
-   observed history ablation before adapting the ST-GNN.
+6. window-close, packet-arrival, non-Nmap, and precursor-deadline early-warning
+   audits (implemented and executed in Colab on development OOF predictions);
+7. matched packet and history MLP screening (implemented for Colab execution),
+   followed by packet-graph construction and the matched static and temporal
+   graph baselines. Compare them with XGB-P, the predeclared full XGB-P+T model,
+   and the stronger observed history ablation before adapting the ST-GNN.
 
 ## Related project documents
 

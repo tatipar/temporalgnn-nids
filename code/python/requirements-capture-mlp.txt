@@ -1,0 +1,5 @@
+# GPU-capable neural dependencies for the cAPTure MLP screening run.
+-r requirements-capture.txt
+scikit-learn>=1.5,<2
+torch>=2.4,<3
+torch-geometric>=2.6,<3
