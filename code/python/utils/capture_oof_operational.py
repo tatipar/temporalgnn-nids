@@ -17,9 +17,12 @@ from .capture_xgb_p_t import validate_xgb_p_t_fold_run
 
 
 MODEL_NAMES = ("xgb_p", "current_window", "history", "full")
-REPORT_VERSION = 1
+REPORT_VERSION = 2
 WINDOW_SECONDS = 5
 NANOSECONDS_PER_SECOND = 1_000_000_000
+PACKET_THRESHOLD_COMPARISON = (
+    "float64_decoded_score_greater_than_or_equal_to_float64_threshold"
+)
 
 
 def operational_budgets(manifest: dict) -> list[tuple[str, float]]:
@@ -32,6 +35,7 @@ def operational_budgets(manifest: dict) -> list[tuple[str, float]]:
         "false_alert_exposure_definition": "all_five_second_wall_clock_windows_from_scenario_origin_through_last_packet_excluding_windows_with_any_attack_packet_including_empty_windows",
         "false_alert_rate_aggregation": "mean_scenario_rates_within_each_fold_then_maximum_fold_rate_for_threshold_selection",
         "threshold_tie_rule": "score_greater_than_or_equal_to_threshold_with_nextafter_above_tied_negative_score",
+        "packet_threshold_comparison_precision": PACKET_THRESHOLD_COMPARISON,
         "sequence_detection_rule": "any_malicious_packet_score_above_or_equal_to_threshold_with_alert_at_window_end",
         "missed_sequence_latency": "last_malicious_packet_timestamp_minus_first_malicious_packet_timestamp_report_with_miss_flag",
     }
@@ -222,7 +226,9 @@ def _packet_counts_by_threshold(path: Path, thresholds: dict[str, float],
     for batch in parquet.iter_batches(batch_size=batch_size,
                                       columns=["binary_label", "score"]):
         labels = batch.column(0).to_numpy(zero_copy_only=False)
-        scores = batch.column(1).to_numpy(zero_copy_only=False)
+        scores = batch.column(1).to_numpy(zero_copy_only=False).astype(
+            np.float64, copy=False
+        )
         if not np.isin(labels, [0, 1]).all() or not np.isfinite(scores).all():
             raise ValueError("OOF packets contain invalid labels or scores.")
         rows += len(labels)
@@ -336,6 +342,7 @@ def run_operational_oof_evaluation(*, manifest_path: Path,
         "status": "development_oof_operational_evaluation_complete",
         "manifest_sha256": sha256_file(manifest_path),
         "evaluator_code_sha256": sha256_file(Path(__file__)),
+        "packet_threshold_comparison_precision": PACKET_THRESHOLD_COMPARISON,
         "git_commit": revision.stdout.strip() if revision.returncode == 0 else "unavailable",
         "git_worktree_status": worktree.stdout if worktree.returncode == 0 else "unavailable",
         "budget_order": [name for name, _ in budgets],
@@ -428,9 +435,12 @@ def validate_operational_run(output_dir: Path, manifest_path: Path,
     if status.get("complete") is not True or status.get("report_sha256") != sha256_file(report_path):
         raise ValueError("The operational OOF report is incomplete or changed.")
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    if (report.get("manifest_sha256") != sha256_file(manifest_path)
+    if (report.get("report_version") != REPORT_VERSION
+            or report.get("manifest_sha256") != sha256_file(manifest_path)
             or report.get("input_runs") != {name: str(path) for name, path in run_dirs.items()}
-            or report.get("evaluator_code_sha256") != sha256_file(Path(__file__))):
+            or report.get("evaluator_code_sha256") != sha256_file(Path(__file__))
+            or report.get("packet_threshold_comparison_precision")
+            != PACKET_THRESHOLD_COMPARISON):
         raise ValueError("The operational report belongs to a different protocol or input run.")
     reports = _validated_runs(load_manifest(manifest_path), run_dirs)
     observed_hashes = {

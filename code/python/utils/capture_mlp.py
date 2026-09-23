@@ -24,6 +24,8 @@ from .capture_feature_profile import (
     preprocessing_schema_sha256,
 )
 from .capture_oof_operational import (
+    PACKET_THRESHOLD_COMPARISON,
+    REPORT_VERSION as OPERATIONAL_REPORT_VERSION,
     _macro_metrics,
     _packet_counts_by_threshold,
     evaluate_scenario,
@@ -883,10 +885,14 @@ def run_capture_mlp_operational_evaluation(
                         f"OOF packet counts differ for {variant}/{scenario}."
                     )
     result = {
-        "report_version": REPORT_VERSION,
+        "report_version": OPERATIONAL_REPORT_VERSION,
         "status": "development_oof_mlp_operational_evaluation_complete",
         "manifest_sha256": sha256_file(manifest_path),
         "evaluator_code_sha256": sha256_file(Path(__file__)),
+        "operational_core_code_sha256": sha256_file(
+            Path(__file__).with_name("capture_oof_operational.py")
+        ),
+        "packet_threshold_comparison_precision": PACKET_THRESHOLD_COMPARISON,
         "mlp_run_dir": str(mlp_run_dir),
         "budget_order": [name for name, _ in budgets],
         "budgets_per_hour": {name: value for name, value in budgets},
@@ -1002,8 +1008,14 @@ def validate_capture_mlp_operational_evaluation(
     if (
         status.get("complete") is not True
         or status.get("report_sha256") != sha256_file(report_path)
+        or report.get("report_version") != OPERATIONAL_REPORT_VERSION
         or report.get("manifest_sha256") != sha256_file(manifest_path)
         or report.get("mlp_run_dir") != str(mlp_run_dir)
+        or report.get("evaluator_code_sha256") != sha256_file(Path(__file__))
+        or report.get("operational_core_code_sha256")
+        != sha256_file(Path(__file__).with_name("capture_oof_operational.py"))
+        or report.get("packet_threshold_comparison_precision")
+        != PACKET_THRESHOLD_COMPARISON
     ):
         raise ValueError("The MLP operational report is incomplete or changed.")
     for variant in VARIANTS:

@@ -681,6 +681,9 @@ protocol is now fixed before running the follow-up notebooks:
   of the two fold means of per-scenario false-alert-window rates meets the
   budget; score ties are handled by moving just above the relevant negative
   window score;
+- decode stored float32 scores and promote them to float64 before every
+  threshold comparison, preserving the `nextafter` tie boundary consistently
+  for packet, window, and sequence metrics;
 - an attack-step iteration is detected only when a malicious packet score
   crosses the threshold; its detection time is that packet's window end;
 - missed iterations retain a miss flag and use their last-minus-first
