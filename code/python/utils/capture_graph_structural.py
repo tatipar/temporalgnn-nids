@@ -954,15 +954,15 @@ def _step_summary(metrics: pd.DataFrame) -> pd.DataFrame:
 
 def _review_markdown(mode: str, scenario_summary: pd.DataFrame, reports: dict) -> str:
     rows = [
-        "# Revisión de la auditoría estructural cAPTure",
+        "# cAPTure structural-audit review",
         "",
-        f"Modo: `{mode}`.",
+        f"Mode: `{mode}`.",
         "",
-        "Este archivo es una plantilla descriptiva. No aprueba automáticamente el gate.",
+        "This file is a descriptive template. It does not automatically approve the gate.",
         "",
-        "## Señales principales",
+        "## Main signals",
         "",
-        "| Escenario | Ventanas no vacías | Nodos medianos | Aristas medianas | Jaccard de nodos adyacentes | Topología dominante | Ventanas mixtas |",
+        "| Scenario | Nonempty windows | Median nodes | Median edges | Adjacent-node Jaccard | Dominant-topology fraction | Mixed-window fraction |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for item in scenario_summary.itertuples(index=False):
@@ -974,9 +974,9 @@ def _review_markdown(mode: str, scenario_summary: pd.DataFrame, reports: dict) -
     rows.extend(
         [
             "",
-            "## Recursos",
+            "## Resources",
             "",
-            "| Escenario | Tiempo total (s) | Paquetes/s | Pico RSS muestreado (GiB) | Modelo estimado (GiB) |",
+            "| Scenario | Total time (s) | Packets/s | Sampled peak RSS (GiB) | Estimated model tensors (GiB) |",
             "|---|---:|---:|---:|---:|",
         ]
     )
@@ -991,16 +991,16 @@ def _review_markdown(mode: str, scenario_summary: pd.DataFrame, reports: dict) -
     rows.extend(
         [
             "",
-            "## Preguntas de revisión manual",
+            "## Manual review questions",
             "",
-            "- [ ] ¿Cambian materialmente los nodos y pares entre ventanas adyacentes?",
-            "- [ ] ¿Las componentes contienen vecindarios compartidos o predominan pares aislados?",
-            "- [ ] ¿Las diferencias por step sobreviven al desglose por escenario y protocolo?",
-            "- [ ] ¿Las reglas hash de endpoint/par o protocolo explican gran parte del ataque?",
-            "- [ ] ¿La construcción cabe en tiempo, RAM y almacenamiento?",
-            "- [ ] ¿Se aprueba avanzar a la comparación de modelos de un seed?",
+            "- [ ] Do nodes and pairs change materially between adjacent windows?",
+            "- [ ] Do components contain shared neighborhoods, or do isolated pairs dominate?",
+            "- [ ] Do step-level differences survive scenario and protocol breakdowns?",
+            "- [ ] Do hashed endpoint/pair or protocol rules explain much of the attack traffic?",
+            "- [ ] Does construction fit the time, RAM, and storage budgets?",
+            "- [ ] Is the one-seed model comparison approved?",
             "",
-            "No acceder a Test1/Test2 para resolver esta revisión.",
+            "Do not access Test1 or Test2 to resolve this review.",
             "",
         ]
     )

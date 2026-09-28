@@ -1,231 +1,222 @@
-# Guía operativa para el piloto de grafos en cAPTure
+# Operational guide for the cAPTure graph pilot
 
-## 1. Propósito y alcance
+## 1. Purpose and scope
 
-Este documento convierte la recomendación de hacer una prueba preliminar de
-grafos en un protocolo ejecutable y auditable. El piloto debe responder una
-pregunta acotada:
+This document turns the recommendation for a preliminary graph experiment into
+an executable and auditable protocol. The pilot must answer one focused
+question:
 
-> ¿Los cinco escenarios de desarrollo contienen variación relacional que una
-> GNN pueda aprovechar y esa información mejora la detección temprana a un
-> costo operativo razonable?
+> Do the five development scenarios contain relational variation that a GNN
+> can exploit, and does that information improve early detection at a
+> reasonable operational cost?
 
-El piloto es **exploratorio y de desarrollo**. Sirve para decidir si la
-topología merece ocupar un lugar central en la propuesta; no confirma la
-superioridad de una arquitectura y no autoriza conclusiones sobre
-generalización final.
+The pilot is **exploratory and development-only**. It supports a decision about
+whether topology should be central to the proposal; it does not confirm the
+superiority of an architecture or authorize final generalization claims.
 
-Queda fuera de alcance:
+The following are out of scope:
 
-- acceder a Test1 o Test2;
-- inspeccionar `train_pub_exf` o `train_user_prop`;
-- cambiar la ventana primaria usando resultados de modelos;
-- seleccionar el mejor seed;
-- afirmar que una diferencia observada con un único seed es estable;
-- interpretar una mejora agregada como evidencia topológica sin los controles
-  de ablación.
+- accessing Test1 or Test2;
+- inspecting `train_pub_exf` or `train_user_prop`;
+- changing the primary window using model results;
+- selecting the best seed;
+- claiming that an observed one-seed difference is stable;
+- interpreting an aggregate improvement as topological evidence without the
+  required ablation controls.
 
-Esta guía complementa, sin reemplazar, el
-[plan experimental de cAPTure](capture-experimental-plan.md), el
-[manifiesto versionado](../configs/capture_experiment_v1.yaml) y el
-[contrato de estado temporal y ablaciones](temporal-state-and-ablation-contract.md).
-En caso de discrepancia, primero se corrige y versiona el manifiesto; no se
-resuelve la diferencia con un parámetro implícito en un notebook.
+This guide complements, but does not replace, the
+[cAPTure experimental plan](capture-experimental-plan.md), the
+[versioned manifest](../configs/capture_experiment_v1.yaml), and the
+[temporal-state and ablation contract](temporal-state-and-ablation-contract.md).
+If they disagree, revise and version the manifest first; do not resolve the
+difference through an implicit notebook parameter.
 
-La Etapa 1 se ejecuta con el notebook
+Stage 1 runs through
 [`capture_graph_structural_audit.ipynb`](../code/python/notebook/capture_graph_structural_audit.ipynb)
-y el contrato
+under the contract in
 [`capture_graph_structural_audit_v1.yaml`](../configs/capture_graph_structural_audit_v1.yaml).
 
-## 2. Contrato congelado para todo el piloto
+## 2. Frozen contract for the entire pilot
 
-| Elemento | Decisión |
+| Element | Decision |
 |---|---|
-| Datos | Sólo los cinco escenarios de desarrollo |
-| Escenarios | `train_empty_conn`, `train_qos_mid`, `train_dollar_char`, `train_slash_char`, `train_sub_exf` |
-| Fold A | entrena con `empty_conn`, `qos_mid`; evalúa en `dollar_char`, `slash_char`, `sub_exf` |
-| Fold B | entrena con `dollar_char`, `slash_char`, `sub_exf`; evalúa en `empty_conn`, `qos_mid` |
+| Data | Only the five development scenarios |
+| Scenarios | `train_empty_conn`, `train_qos_mid`, `train_dollar_char`, `train_slash_char`, `train_sub_exf` |
+| Fold A | train on `empty_conn`, `qos_mid`; evaluate on `dollar_char`, `slash_char`, `sub_exf` |
+| Fold B | train on `dollar_char`, `slash_char`, `sub_exf`; evaluate on `empty_conn`, `qos_mid` |
 | Seed | `42` |
-| Unidad de predicción | un paquete, representado por una arista |
-| Ventanas | fijas, no solapadas, semiabiertas y de 5 segundos |
-| Origen primario | primer timestamp del escenario |
-| Tiempo de decisión | `decision_time = window_end` para todos los modelos |
-| Grafo | multigrafo dirigido; se conservan aristas paralelas |
-| Nodos | MAC Ethernet normalizada; identidades usadas sólo para construir topología |
-| Features | mismo vector de paquete preprocesado dentro de cada fold |
-| Preprocesamiento | ajustado únicamente con los escenarios de entrenamiento del fold |
-| Pesos de entrenamiento | política escenario/clase ya declarada, ajustada sólo en el entrenamiento del fold |
-| Estado temporal | orden cronológico, sin shuffle; reset en escenario, época, pasada de evaluación y fold |
-| Alerta de ventana | máximo score de paquete de la ventana mayor o igual al umbral |
-| Presupuesto primario | una ventana de falsa alerta por hora |
-| Agregación | escenarios dentro de fold y luego folds; no usar sólo micro-promedios de paquetes |
+| Prediction unit | one packet represented by one edge |
+| Windows | fixed, non-overlapping, half-open, five seconds wide |
+| Primary origin | first timestamp in each scenario |
+| Decision time | `decision_time = window_end` for every model |
+| Graph | directed multigraph with parallel edges preserved |
+| Nodes | normalized Ethernet MAC; identities used only to construct topology |
+| Features | the same preprocessed packet vector within each fold |
+| Preprocessing | fitted only on the fold-training scenarios |
+| Training weights | declared scenario/class policy fitted only on fold training data |
+| Temporal state | chronological order without shuffling; reset at scenario, epoch, evaluation pass, and fold boundaries |
+| Window alert | maximum packet score in the window greater than or equal to the threshold |
+| Primary budget | one false-alert window per hour |
+| Aggregation | scenarios within folds, then folds; packet micro-averages cannot stand alone |
 
-Las ventanas vacías no se materializan como grafos, pero sí cuentan como
-exposición temporal en el denominador de falsas alertas. Los saltos de índice
-de ventana deben conservarse para que el modelo temporal conozca el tiempo
-transcurrido.
+Empty windows are not materialized as graphs, but they count as temporal
+exposure in the false-alert denominator. Window-index gaps must be preserved so
+that a temporal model sees the actual elapsed time.
 
-## 3. Decisiones que deben cerrarse antes de entrenar
+## 3. Decisions that must be closed before training
 
-El manifiesto todavía declara como no resueltos la política de memoria y los
-tamaños mínimos de efecto. Antes de observar resultados del piloto se debe
-crear una revisión del manifiesto que congele:
+The manifest still marks the memory policy and minimum effect sizes as
+unresolved. Before inspecting pilot model results, create a manifest revision
+that freezes:
 
-- arquitectura exacta, dimensión oculta, dropout, optimizador, learning rate y
-  weight decay de cada modelo;
-- política de memoria, semivida o corte de gaps;
-- número máximo de épocas, paciencia y mejora mínima del early stopping;
-- regla del subconjunto cronológico interno usado para checkpointing;
-- métrica de checkpoint, independiente de la selección operativa del modelo;
-- cantidad máxima de parámetros o la regla para igualar capacidad;
-- mejoras mínimas que se considerarán materialmente relevantes;
-- costo máximo aceptable de construcción, inferencia y memoria;
-- tolerancia al cambio de origen de ventana.
+- exact architecture, hidden dimension, dropout, optimizer, learning rate, and
+  weight decay for each model;
+- memory policy and its half-life or gap cutoff;
+- maximum epochs, patience, and minimum early-stopping improvement;
+- the rule for the chronological inner checkpoint subset;
+- checkpoint metric, independently of the operational model-selection rule;
+- maximum parameter count or the capacity-matching rule;
+- minimum improvements considered practically meaningful;
+- maximum acceptable construction, inference, and memory costs;
+- tolerance to the shifted window origin.
 
-No se debe elegir esos valores después de comparar scores. Si se usa como
-punto de partida la configuración MLP ya congelada, la decisión debe quedar
-registrada como reutilización deliberada y no como una búsqueda de
-hiperparámetros para la GNN.
+Do not choose these values after comparing scores. If the already frozen MLP
+configuration is reused as a starting point, record that as a deliberate reuse
+rather than a GNN hyperparameter search.
 
-### Early stopping sin contaminar el fold externo
+### Early stopping without contaminating the outer fold
 
-El fold externo produce las predicciones OOF que se reportarán. Por ello, no
-debe seleccionar la época ni el checkpoint.
+The outer fold produces the OOF predictions that will be reported. It must not
+select the epoch or checkpoint.
 
-Para cada fold y escenario de entrenamiento:
+For each fold and each training scenario:
 
-1. ordenar ventanas cronológicamente;
-2. separar un tramo final interno, en límites completos de ventana, sólo para
+1. order windows chronologically;
+2. reserve a final internal segment, at complete window boundaries, only for
    checkpointing;
-3. entrenar con el tramo anterior;
-4. elegir la época mediante la métrica interna congelada;
-5. restaurar ese checkpoint una sola vez;
-6. evaluar los escenarios externos sin volver a ajustar pesos, época o
-   umbral.
+3. train on the preceding segment;
+4. select the epoch with the frozen internal metric;
+5. restore that checkpoint once;
+6. evaluate the outer scenarios without readjusting weights, epoch, or
+   threshold.
 
-La fracción y la métrica internas deben fijarse antes del primer entrenamiento.
-Si no puede definirse un tramo interno con clases y steps adecuados, usar una
-cantidad fija de épocas común a todos los modelos es más limpio que hacer
-early stopping sobre el fold externo. La separación interna es una herramienta
-de checkpointing, no una tercera estimación reportable de generalización.
+Freeze the internal fraction and metric before the first training run. If no
+internal segment with suitable classes and steps can be defined, a common
+fixed epoch count is cleaner than early stopping on the outer fold. The inner
+split is a checkpointing tool, not a third reportable generalization estimate.
 
-## 4. Etapa 1: auditoría estructural sin entrenamiento
+## 4. Stage 1: structural audit without training
 
-### 4.1 Construcción auditable
+### 4.1 Auditable construction
 
-Construir los grafos escenario por escenario, con la misma función que luego
-consumirán los modelos. Para cada paquete debe poder verificarse:
+Construct graphs one scenario at a time with the same logic that downstream
+models will consume. The following mapping must be verifiable for every packet:
 
 ```text
 packet_id -> scenario -> window_id -> edge_index -> edge_attr -> y
 ```
 
-Controles obligatorios:
+Mandatory controls:
 
-- una arista y un target por cada paquete canónico;
-- ningún paquete duplicado, perdido o asignado a dos ventanas;
-- orden de aristas reconstruible mediante `packet_id` o `source_row_id`;
-- endpoints no nulos y normalizados según el esquema;
-- aristas paralelas conservadas;
-- timestamps de grafo estrictamente crecientes dentro de cada escenario;
-- ningún grafo ni estado compartido entre escenarios o folds;
-- igualdad exacta entre labels del paquete y de su arista;
-- hash de los paquetes preparados, preprocesador, configuración y artefactos
-  construidos.
+- one edge and one target per canonical packet;
+- no duplicated, lost, or multiply assigned packet;
+- edge order reconstructable through `packet_id` or `source_row_id`;
+- non-null endpoints normalized under the schema;
+- parallel edges preserved;
+- strictly increasing graph timestamps within each scenario;
+- no graph or state shared across scenarios or folds;
+- exact equality between packet and edge labels;
+- hashes for prepared packets, preprocessor, configuration, and constructed
+  artifacts.
 
-Primero ejecutar un smoke con un escenario de cada bloque benigno. Sólo después
-de revisar sus invariantes construir los cinco escenarios.
+Run SMOKE first with one scenario from each benign block. Construct all five
+scenarios only after reviewing its invariants.
 
-### 4.2 Tabla por ventana
+### 4.2 Per-window table
 
-Guardar una fila por ventana no vacía, más un resumen de ventanas vacías, con
-al menos estas columnas:
+Store one row per nonempty window plus a summary of empty windows, including at
+least these fields:
 
-| Grupo | Campos mínimos |
+| Group | Minimum fields |
 |---|---|
-| Identidad | escenario, bloque benigno, índice, inicio, fin, duración |
-| Tamaño | paquetes/aristas, nodos, pares dirigidos únicos, pares no dirigidos únicos |
-| Conectividad | componentes débiles, fracción de nodos en la mayor componente |
-| Carga relacional | densidad simple dirigida, multiplicidad media y máxima, fracción de aristas paralelas |
-| Cambio | Jaccard de nodos y pares respecto de la ventana anterior, nodos nuevos, nodos retenidos |
-| Labels | benignos, ataques, tipo de ventana, steps presentes, iteraciones presentes |
-| Protocolo | conteos por capa y fracciones de broadcast/multicast, ARP, IPv4/IPv6, TCP/UDP, MQTT/SSH |
-| Recursos | tiempo de construcción, bytes serializados y pico de RAM atribuible |
+| Identity | scenario, benign block, index, start, end, duration |
+| Size | packets/edges, nodes, unique directed pairs, unique undirected pairs |
+| Connectivity | weak components, fraction of nodes in the largest component |
+| Relational load | directed simple density, mean and maximum multiplicity, fraction of parallel edges |
+| Change | node and pair Jaccard against the previous window, new nodes, retained nodes |
+| Labels | benign and attack counts, window type, present steps and iterations |
+| Protocol | counts by layer and broadcast/multicast, ARP, IPv4/IPv6, TCP/UDP, MQTT/SSH fractions |
+| Resources | construction time, serialized bytes, attributable peak RAM |
 
-Definiciones recomendadas, con `m` aristas, `n` nodos y `q` pares dirigidos
-únicos sin contar multiplicidad:
+Recommended definitions, where `m` is the number of edges, `n` the number of
+nodes, and `q` the number of unique directed pairs without multiplicity:
 
 ```text
-density_simple = q / (n * (n - 1))          si n > 1 y no se cuentan self-loops
-mean_multiplicity = m / q                    si q > 0
-parallel_edge_fraction = (m - q) / m         si m > 0
-jaccard_nodes(t) = |V_t inter V_t-1| / |V_t union V_t-1|
-jaccard_pairs(t) = |P_t inter P_t-1| / |P_t union P_t-1|
+simple_density = q / (n * (n - 1))          when n > 1 and self-loops are excluded
+mean_multiplicity = m / q                    when q > 0
+parallel_edge_fraction = (m - q) / m         when m > 0
+node_jaccard(t) = |V_t intersect V_t-1| / |V_t union V_t-1|
+pair_jaccard(t) = |P_t intersect P_t-1| / |P_t union P_t-1|
 ```
 
-La densidad de un multigrafo no debe calcularse directamente con `m`, porque
-puede superar uno y confunde conectividad con volumen. Reportar por separado
-la densidad del grafo simple y la multiplicidad. Declarar cómo se tratan los
-self-loops aunque no aparezcan.
+Do not calculate multigraph density directly with `m`: it may exceed one and
+conflates connectivity with traffic volume. Report simple-graph density and
+multiplicity separately. Declare the self-loop policy even when no self-loops
+are observed.
 
-Calcular cambio de endpoints de dos maneras:
+Calculate endpoint change in two ways:
 
-- entre índices de ventana adyacentes, considerando explícitamente los gaps;
-- entre grafos no vacíos consecutivos, registrando cuántas ventanas vacías los
-  separan.
+- between adjacent wall-clock window indexes, explicitly accounting for gaps;
+- between consecutive nonempty graphs, recording the number of empty windows
+  between them.
 
-Así no se interpreta como continuidad una comparación que saltó minutos de
-tiempo real.
+This prevents a comparison that skipped minutes of real time from being
+misinterpreted as continuity.
 
-### 4.3 Resúmenes requeridos
+### 4.3 Required summaries
 
-Para cada escenario y para el total jerárquico, producir:
+For every scenario and the hierarchical total, produce:
 
-- cantidad de ventanas totales, vacías y no vacías;
-- percentiles 0, 1, 5, 25, 50, 75, 95, 99 y 100 de nodos, aristas, pares,
-  componentes, multiplicidad y tamaño serializado;
-- proporción de ventanas benignas puras, mixtas y de ataque puro;
-- duración continua cubierta y densidad de ventanas ocupadas;
-- distribución de nodos y pares nuevos/retenidos;
-- frecuencia de cada conjunto de endpoints o pares repetido exactamente;
-- topologías más frecuentes y porcentaje de ventanas explicado por ellas;
-- métricas topológicas separadas por benigno puro, mixto, ataque puro y por
-  step, siempre con cantidad de ventanas junto al resumen;
-- tiempo total, tiempo por millón de paquetes, almacenamiento y pico de RAM.
+- total, empty, and nonempty window counts;
+- percentiles 0, 1, 5, 25, 50, 75, 95, 99, and 100 for nodes, edges, pairs,
+  components, multiplicity, and serialized size;
+- fraction of benign-only, mixed, and attack-only windows;
+- continuous covered duration and occupied-window density;
+- distributions of new and retained nodes and pairs;
+- frequency of every exactly repeated endpoint or pair set;
+- most frequent topologies and the fraction of windows they explain;
+- topology metrics split by benign-only, mixed, attack-only, and step, always
+  accompanied by the number of windows;
+- total time, time per million packets, storage, and peak RAM.
 
-Las comparaciones por step son descriptivas. Deben acompañarse por escenario y
-tipo de ventana para no confundir topología de ataque con volumen, protocolo o
-bloque benigno. Si se calculan diferencias estandarizadas o intervalos por
-bootstrap, el remuestreo debe respetar escenario e iteración; las ventanas no
-son observaciones independientes.
+Step comparisons are descriptive. Present them by scenario and window type so
+that attack topology is not confused with traffic volume, protocol, or benign
+block. If standardized differences or bootstrap intervals are calculated,
+resampling must respect scenario and iteration; windows are not independent
+observations.
 
-### 4.4 Auditoría de atajos triviales
+### 4.4 Trivial-shortcut audit
 
-Esta parte no entrena la GNN. Busca señales que podrían explicar un resultado
-sin aprendizaje relacional generalizable:
+This section does not train the GNN. It searches for signals that could explain
+a result without generalizable relational learning:
 
-- prevalencia de ataque por protocolo y por combinaciones simples de
-  indicadores;
-- prevalencia por tipo de dirección MAC: unicast, multicast, broadcast y nodo
-  de grupo;
-- porcentaje de paquetes de ataque identificable por una única regla de
-  protocolo o rol de puerto;
-- endpoints y pares exclusivos de ataque dentro de cada escenario;
-- cobertura en el fold externo de endpoints o pares vistos como ataque en el
-  entrenamiento del fold;
-- rendimiento de reglas de memorización de endpoint/par, usando únicamente el
-  entrenamiento del fold para construir la regla;
-- resultados estratificados MQTT/no MQTT y por protocolo dominante;
-- repetición exacta de fondos benignos o ventanas estructuralmente idénticas.
+- attack prevalence by protocol and simple indicator combinations;
+- prevalence by MAC direction type: unicast, multicast, broadcast, and group
+  node;
+- fraction of attack packets identified by a single protocol or port-role rule;
+- attack-exclusive endpoints and pairs within each scenario;
+- outer-fold coverage of endpoints or pairs seen with attack in fold training;
+- endpoint/pair memorization rules constructed only from fold-training data;
+- MQTT/non-MQTT and dominant-protocol stratification;
+- exact repetition of benign backgrounds or structurally identical windows.
 
-Las MAC crudas, OUI, IDs globales, nombres de escenario y steps nunca se
-incorporan a `edge_attr`. Pueden utilizarse en esta auditoría como metadatos
-diagnósticos, siempre que el reporte diferencie con claridad una fuga o atajo
-de una feature permitida.
+Raw MAC addresses, OUIs, global IDs, scenario names, and step names never enter
+`edge_attr`. They may be used as diagnostic metadata in this audit as long as
+the report clearly distinguishes leakage or shortcuts from permitted features.
 
-### 4.5 Salidas de la etapa 1
+### 4.5 Stage-1 outputs
 
-La etapa queda completa cuando existen:
+Stage 1 is complete when the following artifacts exist:
 
 ```text
 graph_pilot/<run_id>/
@@ -242,242 +233,240 @@ graph_pilot/<run_id>/
   review.md
 ```
 
-`review.md` debe contestar, con evidencia:
+`review.md` must answer with evidence:
 
-1. ¿Cambian los nodos y enlaces entre ventanas?
-2. ¿La mayor parte del tráfico es un conjunto pequeño de pares repetidos?
-3. ¿Hay estructura conectada suficiente para propagación de mensajes?
-4. ¿Las diferencias por step sobreviven al desglose por escenario y protocolo?
-5. ¿La construcción completa cabe en el entorno previsto?
-6. ¿Un atajo de MAC o protocolo podría dominar cualquier aparente ganancia?
+1. Do nodes and links change across windows?
+2. Is most traffic carried by a small set of repeated pairs?
+3. Is there enough connected structure for message passing?
+4. Do step-level differences survive scenario and protocol breakdowns?
+5. Does complete construction fit the intended environment?
+6. Could a MAC or protocol shortcut dominate any apparent gain?
 
-### 4.6 Gate estructural
+### 4.6 Structural gate
 
-Continuar a la etapa 2 sólo si la construcción es íntegra y cabe en recursos.
-Una topología casi constante, componentes triviales de dos nodos, ausencia de
-vecindarios compartidos o una regla simple que explica casi todos los ataques
-son razones para **depriorizar** la GNN. No son una razón para descartar memoria
-temporal, el MLP o los resúmenes causales ya existentes.
+Proceed to Stage 2 only when construction is correct and fits the resource
+budget. Nearly constant topology, trivial two-node components, no shared
+neighborhoods, or a simple rule that explains almost all attacks are reasons to
+**deprioritize** a GNN. They are not reasons to discard temporal memory, the
+MLP, or the existing causal summaries.
 
-La variación estructural es una condición favorable, no prueba que sea
-predictiva. La decisión final sobre utilidad topológica necesita las
-ablaciones de la etapa 2.
+Structural variation is a favorable condition, not proof that it is
+predictive. The Stage-2 ablations are required to decide whether topology is
+useful.
 
-## 5. Etapa 2: comparación de un seed en desarrollo
+## 5. Stage 2: one-seed development comparison
 
-### 5.1 Matriz mínima
+### 5.1 Minimum matrix
 
-Todos los modelos reciben exactamente los mismos paquetes, features, folds,
-pesos de entrenamiento, ventanas y tiempos de decisión.
+Every model receives exactly the same packets, features, folds, training
+weights, windows, and decision times.
 
-| Variante | Clase conceptual | Información disponible | Pregunta |
+| Variant | Conceptual class | Available information | Question |
 |---|---|---|---|
-| Edge MLP | `SimpleMLP` | paquete actual | ¿Qué logra una red sin tiempo ni relaciones? |
-| EdgeGRU | `EdgeGRU_Baseline_NoX` | paquete + memoria por nodo | ¿Agrega valor la memoria sin GAT? |
-| StaticGNN | `StaticGNN_Identity` | paquete + topología actual | ¿Agrega valor la propagación actual sin memoria recurrente? |
-| ST-GNN | `ST_GNN_Identity` | paquete + topología + memoria | ¿Se complementan estructura y tiempo? |
-| ST-GNN sin GAT | `ST_GNN_Identity(use_topology=false)` | paquete + agregación por endpoint + memoria, sin message passing GAT | Control principal de las capas topológicas |
-| ST-GNN sin acceso directo a `edge_attr` | `ST_GNN_Identity(use_direct_edge_attr=false)` | edge features sólo a través de identidad/agregación y GAT | ¿El clasificador depende del atajo directo del paquete? |
+| Edge MLP | `SimpleMLP` | current packet | What can a network do without time or relations? |
+| EdgeGRU | `EdgeGRU_Baseline_NoX` | packet plus per-node memory | Does memory add value without GAT? |
+| StaticGNN | `StaticGNN_Identity` | packet plus current topology | Does current message passing add value without recurrent memory? |
+| ST-GNN | `ST_GNN_Identity` | packet plus topology plus memory | Do structure and time complement each other? |
+| ST-GNN without GAT | `ST_GNN_Identity(use_topology=false)` | packet plus endpoint aggregation plus memory, without GAT message passing | Main control for the topological layers |
+| ST-GNN without direct `edge_attr` | `ST_GNN_Identity(use_direct_edge_attr=false)` | edge features only through identity/aggregation and GAT | Does the classifier depend on the direct packet shortcut? |
 
-La última variante es condicional al costo y se ejecuta sólo si se declaró
-antes de ver los resultados de la matriz mínima.
+The last variant is conditional on cost and runs only if declared before
+inspecting the minimum-matrix results.
 
-**Precisión conceptual importante:** en la implementación actual,
-`use_topology=false` evita las capas GATv2, pero conserva agregados locales de
-aristas entrantes y salientes para formar la identidad del nodo. Por eso debe
-llamarse “sin GAT” o “sin message passing”, no “sin toda topología”. Asimismo,
-`use_direct_edge_attr=false` no elimina las features del paquete de la
-construcción de identidad ni de los mensajes GAT. Edge MLP y EdgeGRU son los
-controles sin propagación de mensajes necesarios para completar la
-interpretación.
+**Important conceptual detail:** in the current implementation,
+`use_topology=false` bypasses GATv2 layers but retains local incoming/outgoing
+edge aggregates when constructing node identity. Call it “without GAT” or
+“without message passing,” not “without all topology.” Similarly,
+`use_direct_edge_attr=false` does not remove packet features from identity
+construction or GAT messages. Edge MLP and EdgeGRU provide the controls without
+message passing needed for interpretation.
 
-### 5.2 Igualdad experimental
+### 5.2 Experimental equality
 
-Antes de lanzar una corrida, un test de contrato debe demostrar que las
-variantes tienen:
+Before launching a run, a contract check must demonstrate that all variants
+have:
 
-- los mismos IDs y orden de paquetes en entrenamiento y evaluación;
-- el mismo `edge_attr`, target y peso por paquete;
-- la misma asignación a ventanas;
-- el mismo origen y `window_end`;
-- el mismo fold y subconjunto interno de checkpoint;
-- el mismo umbral operativo definido a partir de OOF, no uno elegido en Test;
-- resets y orden temporal correctos;
-- parámetros y FLOPs reportados, aunque no sean idénticos.
+- identical packet IDs and ordering in training and evaluation;
+- identical `edge_attr`, target, and weight per packet;
+- identical window assignment;
+- identical origin and `window_end`;
+- identical fold and inner checkpoint subset;
+- the same operational threshold procedure based on OOF, never on Test;
+- correct resets and temporal ordering;
+- reported parameters and FLOPs, even when not identical.
 
-No añadir resúmenes XGB-P+T a una variante aislada. Si se desea una segunda
-matriz con los seis features históricos causales, debe darse el mismo vector a
-todas las variantes y etiquetarse como un experimento separado.
+Do not add XGB-P+T summaries to only one variant. If a second matrix with the
+six causal history features is desired, give the same vector to every variant
+and label it as a separate experiment.
 
-### 5.3 Entrenamiento y persistencia
+### 5.3 Training and persistence
 
-Para cada combinación de fold y modelo:
+For every fold/model combination:
 
-1. fijar seed `42` para Python, NumPy, PyTorch y CUDA;
-2. cargar sólo los escenarios de entrenamiento del fold;
-3. ajustar preprocessing y pesos sólo con ese conjunto;
-4. entrenar en orden cronológico cuando exista estado temporal;
-5. hacer early stopping sólo con el tramo interno predeclarado;
-6. restaurar el mejor checkpoint interno;
-7. resetear toda memoria;
-8. inferir una única vez sobre cada escenario externo;
-9. persistir un score por paquete, junto con claves temporales y de evaluación;
-10. registrar duración, pico de RAM/VRAM, parámetros y tamaño del checkpoint.
+1. set seed `42` for Python, NumPy, PyTorch, and CUDA;
+2. load only the fold-training scenarios;
+3. fit preprocessing and weights only on that set;
+4. train chronologically whenever temporal state exists;
+5. apply early stopping only to the predeclared inner segment;
+6. restore the best inner checkpoint;
+7. reset all memory;
+8. run inference exactly once on every outer scenario;
+9. persist one score per packet with its temporal and evaluation keys;
+10. record duration, peak RAM/VRAM, parameter count, and checkpoint size.
 
-Los modelos no temporales pueden barajar ejemplos para optimización sólo si no
-cambia el conjunto ni los pesos. Para comparabilidad de inferencia, todos se
-evalúan como secuencias de ventanas en el mismo orden.
+Non-temporal models may shuffle examples for optimization only if the example
+set and weights remain unchanged. For inference comparability, every model is
+evaluated as the same ordered sequence of windows.
 
-El tiempo de inferencia debe medirse sin carga de archivos y también extremo a
-extremo. Reportar, como mínimo, segundos por millón de paquetes y percentiles
-de latencia por ventana después de un warm-up explícito. Sincronizar CUDA antes
-y después de cada medición.
+Measure pure inference time and end-to-end inference time separately. At a
+minimum, report seconds per million packets and per-window latency percentiles
+after an explicit warm-up. Synchronize CUDA before and after each measurement.
 
-### 5.4 Umbral y semántica operativa
+### 5.4 Threshold and operational semantics
 
-Una ventana alerta cuando:
+A window alerts when:
 
 ```text
-max(packet_score en la ventana) >= threshold
+max(packet_score in the window) >= threshold
 ```
 
-Para cada modelo, el umbral de desarrollo se obtiene de sus predicciones OOF:
-el menor umbral cuyo peor promedio de fold de falsas alertas por escenario
-cumple una ventana falsa por hora. Deben conservarse las reglas ya declaradas
-para empates con `nextafter` y comparación en `float64`.
+For each model, obtain its development threshold from its OOF predictions: the
+smallest threshold whose worst fold mean of scenario false-alert rates meets
+one false-alert window per hour. Preserve the declared `nextafter` tie handling
+and `float64` comparison rules.
 
-Esta calibración y su evaluación usan las mismas predicciones OOF, por lo que
-los resultados operativos del piloto pueden ser optimistas. Son adecuados para
-screening, no para una cifra confirmatoria.
+This calibration and its evaluation use the same OOF predictions, so pilot
+operational results may be optimistic. They are suitable for screening, not a
+confirmatory estimate.
 
-## 6. Métricas obligatorias
+## 6. Required metrics
 
-### 6.1 Detección y operación
+### 6.1 Detection and operation
 
-Reportar por modelo, fold, escenario y step:
+Report by model, fold, scenario, and step:
 
-- ROC-AUC y PR-AUC de paquete como diagnósticos;
-- precisión, recall y FPR de paquete al umbral operativo;
-- ventanas de falsa alerta por hora;
-- iteraciones totales, detectadas y perdidas;
-- cobertura de iteraciones con una alerta correcta estrictamente anterior al
-  último paquete malicioso de la iteración;
-- cobertura antes de la acción terminal declarada;
-- cobertura por tipo de step;
-- primer tiempo de alerta y lead time;
-- cantidad de escenarios y steps donde cambia el signo de la diferencia frente
-  al control.
+- packet ROC-AUC and PR-AUC as diagnostics;
+- packet precision, recall, and FPR at the operational threshold;
+- false-alert windows per hour;
+- total, detected, and missed iterations;
+- iteration coverage with a correct alert strictly before the final malicious
+  packet in the iteration;
+- coverage before the declared terminal action;
+- coverage by step type;
+- first alert time and lead time;
+- number of scenarios and steps in which the difference against the control
+  changes sign.
 
-Definiciones temporales:
+Temporal definitions:
 
 ```text
-alert_time = window_end de la primera ventana con un paquete malicioso que cruza el umbral
-timely_step = alert_time < timestamp del último paquete malicioso de la iteración
-early_terminal = alert_time < inicio de la primera acción terminal declarada
+alert_time = window_end of the first window containing a malicious packet above threshold
+timely_step = alert_time < timestamp of the iteration's final malicious packet
+early_terminal = alert_time < onset of the first declared terminal action
 terminal_lead_time = terminal_onset - alert_time
 ```
 
-Los misses permanecen como misses; no se convierten en una detección al final
-del step. El lead time se resume únicamente junto con la cobertura y la
-cantidad de misses. Informar mediana y percentiles además de la media, porque
-la ventana de 5 segundos cuantiza el tiempo.
+Misses remain misses; they are not converted to detections at step completion.
+Summarize lead time only alongside coverage and miss counts. Report medians and
+percentiles in addition to the mean because the five-second window quantizes
+time.
 
-### 6.2 Costo
+### 6.2 Cost
 
-Separar siempre:
+Always separate:
 
-- tiempo único de construcción de grafos;
-- tiempo de entrenamiento hasta el checkpoint elegido;
-- tiempo de inferencia puro;
-- tiempo de inferencia extremo a extremo;
-- pico de RAM y VRAM;
-- tamaño de grafos y checkpoints en disco;
-- cantidad de parámetros y ventanas/paquetes procesados por segundo.
+- one-time graph-construction time;
+- training time through the selected checkpoint;
+- pure inference time;
+- end-to-end inference time;
+- peak RAM and VRAM;
+- graph and checkpoint disk size;
+- parameter count and windows/packets processed per second.
 
-### 6.3 Sensibilidad al origen
+### 6.3 Window-origin sensitivity
 
-Después de cerrar la matriz primaria, reconstruir ventanas con un desplazamiento
-de `+2.5 s`. La sensibilidad mínima incluye Edge MLP y las variantes que
-sustenten una conclusión topológica; no es necesario repetir automáticamente
-toda la escalera si el costo es prohibitivo.
+After closing the primary matrix, reconstruct windows with a `+2.5 s` shift.
+The minimum sensitivity includes Edge MLP and the variants supporting a
+topological conclusion; repeating the entire ladder is not automatically
+required if cost is prohibitive.
 
-No reoptimizar arquitectura ni ancho de ventana. Aplicar el protocolo
-predeclarado y reportar:
+Do not retune architecture or window width. Apply the predeclared protocol and
+report:
 
-- cambio absoluto de cobertura oportuna;
-- cambio de falsas alertas por hora;
-- cambio de lead time;
-- cambio de tamaño y costo de grafos;
-- si se conserva el signo de las comparaciones topológicas principales.
+- absolute change in timely coverage;
+- change in false alerts per hour;
+- change in lead time;
+- change in graph size and cost;
+- whether the sign of the main topological comparisons is preserved.
 
-El origen desplazado es una sensibilidad de desarrollo, no una oportunidad
-para reemplazar retrospectivamente el origen primario.
+The shifted origin is a development sensitivity, not an opportunity to replace
+the primary origin retrospectively.
 
-## 7. Lectura causal de las comparaciones
+## 7. Causal interpretation of comparisons
 
-| Comparación | Evidencia principal | Limitación |
+| Comparison | Main evidence | Limitation |
 |---|---|---|
-| EdgeGRU - Edge MLP | valor de memoria por endpoint | también cambia la arquitectura |
-| StaticGNN - Edge MLP | valor de agregación/message passing actual | puede cambiar capacidad y optimización |
-| ST-GNN - StaticGNN | valor incremental de memoria con estructura | requiere configuraciones alineadas |
-| ST-GNN - EdgeGRU | valor incremental de GAT en un modelo temporal | no aísla perfectamente interacciones |
-| ST-GNN - ST-GNN sin GAT | valor de las capas GATv2 dentro de la misma familia | el control aún usa agregación por endpoint |
-| ST-GNN sin `edge_attr` directo - ST-GNN | dependencia del atajo directo al clasificador | las features siguen presentes en identidad y mensajes |
+| EdgeGRU - Edge MLP | value of per-endpoint memory | architecture also changes |
+| StaticGNN - Edge MLP | value of current aggregation/message passing | capacity and optimization may differ |
+| ST-GNN - StaticGNN | incremental value of memory with structure | requires aligned configurations |
+| ST-GNN - EdgeGRU | incremental value of GAT in a temporal model | does not perfectly isolate interactions |
+| ST-GNN - ST-GNN without GAT | value of GATv2 layers within one family | the control still uses endpoint aggregation |
+| ST-GNN without direct `edge_attr` - ST-GNN | dependence on the classifier's direct shortcut | features remain in identity and messages |
 
-Una mejora sólo en AUC no demuestra utilidad operativa. La evidencia relevante
-es una mejora consistente de cobertura o lead time al mismo presupuesto de
-falsas alertas, acompañada por desglose de escenario/step y costo.
+An AUC-only gain does not demonstrate operational utility. Relevant evidence
+is a consistent improvement in coverage or lead time at the same false-alert
+budget, accompanied by scenario/step breakdowns and cost.
 
-## 8. Regla de decisión del piloto
+## 8. Pilot decision rule
 
-Antes de entrenar, completar en el manifiesto los campos entre corchetes:
+Before training, complete the bracketed manifest fields:
 
 ```text
-mejora_mínima_cobertura_oportuna = [valor]
-mejora_mínima_cobertura_terminal = [valor]
-mejora_mínima_lead_time = [valor y estadístico]
-escenarios_con_signo_positivo_mínimos = [valor de 5]
-degradación_máxima_por_origen_desplazado = [valor]
-costo_máximo_inferencia = [valor]
-pico_máximo_ram_vram = [valor]
+minimum_timely_coverage_improvement = [value]
+minimum_terminal_coverage_improvement = [value]
+minimum_lead_time_improvement = [value and statistic]
+minimum_scenarios_with_positive_sign = [value out of 5]
+maximum_shifted_origin_degradation = [value]
+maximum_inference_cost = [value]
+maximum_peak_ram_vram = [value]
 ```
 
-### La topología merece avanzar
+### Topology should advance
 
-Sólo si se cumplen conjuntamente:
+Only when all of the following hold:
 
-- StaticGNN o ST-GNN supera su control no topológico en una métrica operativa
-  predeclarada al mismo presupuesto de falsas alertas;
-- la diferencia alcanza el tamaño mínimo práctico congelado;
-- el signo no depende de un único escenario, step o protocolo;
-- la conclusión principal se conserva con origen desplazado;
-- el resultado no se explica por identidades MAC o una regla trivial de
-  protocolo;
-- construcción e inferencia cumplen el presupuesto de recursos.
+- StaticGNN or ST-GNN beats its non-topological control on a predeclared
+  operational metric at the same false-alert budget;
+- the difference reaches the frozen minimum practical effect;
+- the sign does not depend on one scenario, step, or protocol;
+- the main conclusion survives the shifted origin;
+- raw MAC identities or a trivial protocol rule do not explain the result;
+- construction and inference meet the resource budget.
 
-El siguiente paso sería una confirmación multi-seed en desarrollo antes de
-congelar el pipeline final. Test1 y Test2 continúan cerrados.
+The next step is multi-seed development confirmation before freezing the final
+pipeline. Test1 and Test2 remain closed.
 
-### La evidencia favorece tiempo pero no topología
+### Evidence favors time but not topology
 
-Si EdgeGRU mejora al Edge MLP, pero StaticGNN/ST-GNN no mejoran a los controles
-sin GAT, priorizar memoria temporal o el baseline `history` ya disponible. La
-GNN puede quedar como análisis secundario, no como contribución central.
+If EdgeGRU improves over Edge MLP but StaticGNN/ST-GNN do not improve over the
+controls without GAT, prioritize temporal memory or the existing `history`
+baseline. The GNN may remain a secondary analysis rather than a central
+contribution.
 
-### La topología se deprioriza
+### Topology should be deprioritized
 
-Si la auditoría muestra grafos casi constantes o triviales y las ablaciones no
-aportan mejoras operativas robustas, documentar el resultado negativo y evitar
-una búsqueda amplia de GNN. Esto es una conclusión válida del piloto, no un
-fallo de ejecución.
+If the audit shows nearly constant or trivial graphs and the ablations do not
+provide robust operational gains, document the negative result and avoid a
+broad GNN search. This is a valid pilot conclusion, not an execution failure.
 
-### Resultado inconcluso
+### Inconclusive result
 
-Marcarlo como inconcluso si hay fallos de contrato, memoria insuficiente,
-inestabilidad severa con el origen, dependencia de un único escenario o
-diferencias menores que los mínimos predeclarados. No resolverlo mirando Test.
+Mark the result inconclusive if there are contract failures, insufficient
+memory, severe origin sensitivity, dependence on one scenario, or differences
+smaller than the predeclared minimum effects. Do not resolve it by looking at
+Test.
 
-## 9. Entregables de la etapa 2
+## 9. Stage-2 deliverables
 
 ```text
 graph_pilot/<run_id>/
@@ -502,7 +491,7 @@ graph_pilot/<run_id>/
   pilot_decision.md
 ```
 
-Cada fila de `predictions.parquet` debe conservar al menos:
+Every `predictions.parquet` row must retain at least:
 
 ```text
 model, fold, scenario, packet_id, source_row_id, window_id,
@@ -510,52 +499,52 @@ window_start, window_end, packet_timestamp, binary_label,
 attack_step, sequence_id, score
 ```
 
-`attack_step` y `sequence_id` son metadatos exclusivos de evaluación. Nunca se
-entregan al modelo.
+`attack_step` and `sequence_id` are evaluation-only metadata. They are never
+given to the model.
 
-## 10. Checklist de ejecución
+## 10. Execution checklist
 
-### Antes de construir
+### Before construction
 
-- [ ] Test1, Test2 y escenarios prohibidos siguen inaccesibles.
-- [ ] Manifest, schemas y artefactos preparados tienen hashes verificados.
-- [ ] Política de self-loops, broadcast, multicast y no-IP coincide con el manifiesto.
-- [ ] Métricas estructurales y fórmulas están congeladas.
-- [ ] Presupuestos de almacenamiento, RAM y tiempo están declarados.
+- [ ] Test1, Test2, and prohibited scenarios remain inaccessible.
+- [ ] Manifest, schemas, and prepared artifacts have verified hashes.
+- [ ] Self-loop, broadcast, multicast, and non-IP policies match the manifest.
+- [ ] Structural metrics and formulas are frozen.
+- [ ] Storage, RAM, and time budgets are declared.
 
-### Antes de entrenar
+### Before training
 
-- [ ] Etapa 1 revisada y gate estructural documentado.
-- [ ] Configuraciones exactas y tamaños mínimos de efecto están versionados.
-- [ ] Split cronológico interno o alternativa de épocas fijas está congelado.
-- [ ] Test sintético verifica correspondencia paquete-arista-output.
-- [ ] Test sintético verifica resets, gaps y orden temporal.
-- [ ] Todas las variantes reciben la misma vista de features.
-- [ ] Se verificó el significado exacto de cada ablación.
+- [ ] Stage 1 has been reviewed and the structural gate documented.
+- [ ] Exact configurations and minimum effect sizes are versioned.
+- [ ] The chronological inner split or fixed-epoch alternative is frozen.
+- [ ] A synthetic contract check verifies packet-edge-output correspondence.
+- [ ] A synthetic contract check verifies resets, gaps, and temporal order.
+- [ ] Every variant receives the same feature view.
+- [ ] The exact meaning of every ablation has been verified.
 
-### Antes de decidir
+### Before deciding
 
-- [ ] Hay una predicción OOF por paquete y modelo.
-- [ ] Umbrales usan sólo OOF de desarrollo y la regla de una falsa alerta/hora.
-- [ ] Cobertura oportuna y terminal usan desigualdad estricta.
-- [ ] Misses, denominadores y tamaños de muestra están visibles.
-- [ ] Resultados están separados por fold, escenario, step y protocolo.
-- [ ] Se informan tiempo, RAM/VRAM y almacenamiento.
-- [ ] Se ejecutó la sensibilidad de origen predeclarada.
-- [ ] La decisión se tomó con los criterios congelados, no sólo con AUC.
-- [ ] El reporte dice explícitamente que el piloto usa un solo seed.
+- [ ] There is one OOF prediction per packet and model.
+- [ ] Thresholds use development OOF only and the one-false-alert-per-hour rule.
+- [ ] Timely and terminal coverage use strict inequality.
+- [ ] Misses, denominators, and sample sizes are visible.
+- [ ] Results are separated by fold, scenario, step, and protocol.
+- [ ] Time, RAM/VRAM, and storage are reported.
+- [ ] The predeclared origin sensitivity has been executed.
+- [ ] The decision uses the frozen criteria, not AUC alone.
+- [ ] The report explicitly states that the pilot uses one seed.
 
-## 11. Tabla compacta para `pilot_decision.md`
+## 11. Compact table for `pilot_decision.md`
 
-| Pregunta | Evidencia | Resultado | Decisión |
+| Question | Evidence | Result | Decision |
 |---|---|---|---|
-| ¿Hay variación real de nodos y enlaces? | percentiles, Jaccard, topologías repetidas |  |  |
-| ¿Hay vecindarios no triviales? | componentes, mayor componente, grados, multiplicidad |  |  |
-| ¿Existen atajos de MAC/protocolo? | auditoría de reglas y estratos |  |  |
-| ¿La topología mejora cobertura oportuna? | StaticGNN/MLP y ST-GNN/sin GAT |  |  |
-| ¿La memoria mejora cobertura o lead time? | EdgeGRU/MLP y ST-GNN/StaticGNN |  |  |
-| ¿Se detecta antes de la acción terminal? | cobertura y lead time terminal |  |  |
-| ¿Cumple una falsa alerta por hora? | peor promedio de fold |  |  |
-| ¿Es estable al origen `+2.5 s`? | sensibilidad de ventana |  |  |
-| ¿Cabe en recursos? | tiempos, throughput, RAM/VRAM, disco |  |  |
-| ¿Debe avanzar a multi-seed? | criterios predeclarados completos |  |  |
+| Is there real node and link variation? | percentiles, Jaccard, repeated topologies |  |  |
+| Are there non-trivial neighborhoods? | components, largest component, degrees, multiplicity |  |  |
+| Are there MAC/protocol shortcuts? | rule and stratum audit |  |  |
+| Does topology improve timely coverage? | StaticGNN/MLP and ST-GNN/without GAT |  |  |
+| Does memory improve coverage or lead time? | EdgeGRU/MLP and ST-GNN/StaticGNN |  |  |
+| Does detection precede the terminal action? | terminal coverage and lead time |  |  |
+| Does it meet one false alert per hour? | worst fold mean |  |  |
+| Is it stable under the `+2.5 s` origin? | window sensitivity |  |  |
+| Does it fit resource budgets? | time, throughput, RAM/VRAM, disk |  |  |
+| Should it advance to multi-seed confirmation? | all predeclared criteria |  |  |
