@@ -308,6 +308,49 @@ graph_materialization_runs/<run_id>/
     ...
 ```
 
+### 4.8 Stage-2 graph-input boundary
+
+Before implementing the training runner, validate the immutable FULL_DEV
+materialization with
+[`capture_graph_input_audit.ipynb`](../code/python/notebook/capture_graph_input_audit.ipynb)
+and
+[`capture_graph_stage2_input_v1.yaml`](../configs/capture_graph_stage2_input_v1.yaml).
+The notebook copies the small compressed collection from Drive to local Colab
+storage and verifies every artifact checksum before repeated access.
+
+The loader exposes one fold/scenario sequence at a time. It reconstructs local
+`edge_index`, `edge_attr`, targets, scenario-scoped global node IDs,
+`source_row_id`, window coordinates, and decision time as a PyTorch Geometric
+`Data` object. Stored nanosecond boundaries remain available for provenance;
+the model timestamp is the integer-millisecond floor required by the temporal
+state implementation. Because all window boundaries share one scenario origin,
+this conversion preserves every five-second interval and empty-window gap.
+
+The physical presence of every scenario below both fold directories does not
+authorize mixing them. The loader derives and enforces these roles:
+
+| Scenario | Fold A | Fold B | OOF fold |
+|---|---|---|---|
+| `train_empty_conn` | train | validation | B |
+| `train_qos_mid` | train | validation | B |
+| `train_dollar_char` | validation | train | A |
+| `train_slash_char` | validation | train | A |
+| `train_sub_exf` | validation | train | A |
+
+Run the bounded first/middle/last sample before approving the full loader scan.
+The full scan must establish all of the following before training code is
+enabled:
+
+- one valid graph object for every materialized window representation;
+- contiguous `source_row_id` values and exact packet-edge conservation;
+- strictly increasing windows and timestamps within every scenario;
+- exactly one training role and one OOF validation role per development packet
+  across the two folds;
+- no persisted node features, held-out access, or model optimization.
+
+Temporal state must be reset between the scenario datasets. A single loader
+spanning multiple scenarios without an explicit reset is outside the contract.
+
 ## 5. Stage 2: one-seed development comparison
 
 ### 5.1 Minimum matrix
@@ -571,6 +614,8 @@ given to the model.
 - [ ] Stage 1 has been reviewed and the structural gate documented.
 - [ ] SMOKE and FULL_DEV graph materialization passed all cross-fold invariants.
 - [ ] The immutable FULL_DEV materialization run ID is recorded.
+- [ ] The Stage-2 sample and full graph-input audits passed.
+- [ ] Training and validation datasets are selected only through declared fold roles.
 - [ ] Exact configurations and minimum effect sizes are versioned.
 - [ ] The chronological inner split or fixed-epoch alternative is frozen.
 - [ ] A synthetic contract check verifies packet-edge-output correspondence.

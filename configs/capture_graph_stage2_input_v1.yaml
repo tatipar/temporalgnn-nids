@@ -1,0 +1,45 @@
+input_contract_version: 1
+experiment_id: capture_graph_stage2_input_v1
+scope: development_only
+stage: stage2_graph_input_validation
+
+materialization:
+  required_mode: FULL_DEV
+  required_status: passed
+  required_feature_dimension: 103
+  window_duration_seconds: 5
+  decision_time: window_end
+  held_out_scenarios_accessed: false
+  training_performed: false
+
+folds:
+  A:
+    train: [train_empty_conn, train_qos_mid]
+    validation: [train_dollar_char, train_slash_char, train_sub_exf]
+  B:
+    train: [train_dollar_char, train_slash_char, train_sub_exf]
+    validation: [train_empty_conn, train_qos_mid]
+
+loader:
+  graph_order: chronological_within_scenario
+  shuffle: false
+  graph_batch_size: 1
+  scenario_boundary_resets_temporal_state: true
+  empty_windows: preserve_through_window_index_and_timestamp_gaps
+  timestamp_conversion: floor_nanoseconds_to_integer_milliseconds
+  edge_index_dtype: torch_int64
+  edge_attr_dtype: torch_float32
+  target_dtype: torch_float32
+  global_node_id_dtype: torch_int64
+  source_row_id_dtype: torch_int64
+  persist_node_features_x: false
+  copy_drive_artifacts_to_local_before_repeated_access: true
+  verify_all_checksums_after_staging: true
+
+audit:
+  sample_graph_positions: [first, middle, last]
+  full_scan_required_before_training: true
+  require_contiguous_source_rows: true
+  require_one_oof_role_per_scenario: true
+  allow_training: false
+  allow_held_out_access: false
