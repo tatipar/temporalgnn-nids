@@ -314,7 +314,7 @@ Before implementing the training runner, validate the immutable FULL_DEV
 materialization with
 [`capture_graph_input_audit.ipynb`](../code/python/notebook/capture_graph_input_audit.ipynb)
 and
-[`capture_graph_stage2_input_v1.yaml`](../configs/capture_graph_stage2_input_v1.yaml).
+[`capture_graph_stage2_input_v2.yaml`](../configs/capture_graph_stage2_input_v2.yaml).
 The notebook copies the small compressed collection from Drive to local Colab
 storage and verifies every artifact checksum before repeated access.
 
@@ -346,7 +346,18 @@ enabled:
 - strictly increasing windows and timestamps within every scenario;
 - exactly one training role and one OOF validation role per development packet
   across the two folds;
+- an exact per-edge join from `source_row_id` to the bound prepared packets,
+  yielding one bijective scenario-scoped `global_node_id` to normalized MAC
+  mapping with no unresolved nodes or conflicts;
+- equality between the mapping contract reconstructed independently from graph
+  edges and prepared packets and the semantic mapping hash stored by both folds;
 - no persisted node features, held-out access, or model optimization.
+
+The recovered raw-MAC lookup is diagnostic provenance, not a model input. It is
+stored only below the immutable graph-input audit run in
+`node_identity_lookup/`, with a checksum manifest. Training loaders must not
+read that directory. This prevents the CIC2018 failure mode in which a decoder
+was regenerated independently with a different ID permutation.
 
 Temporal state must be reset between the scenario datasets. A single loader
 spanning multiple scenarios without an explicit reset is outside the contract.

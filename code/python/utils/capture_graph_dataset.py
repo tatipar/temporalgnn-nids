@@ -21,7 +21,7 @@ from .capture_data import sha256_file, write_json
 from .capture_graph_materialization import SHARD_ARRAYS
 
 
-REPORT_VERSION = 1
+REPORT_VERSION = 2
 NANOSECONDS_PER_MILLISECOND = 1_000_000
 VALID_FOLDS = ("A", "B")
 VALID_PARTITIONS = ("train", "validation")
@@ -46,7 +46,7 @@ def load_capture_graph_input_contract(path: Path) -> dict:
     if not isinstance(contract, dict):
         raise ValueError("The Stage-2 graph-input contract must be a mapping.")
     if (
-        contract.get("input_contract_version") != 1
+        contract.get("input_contract_version") != 2
         or contract.get("scope") != "development_only"
         or contract.get("stage") != "stage2_graph_input_validation"
     ):
@@ -109,6 +109,20 @@ def load_capture_graph_input_contract(path: Path) -> dict:
     }
     if contract.get("audit") != required_audit:
         raise ValueError("The Stage-2 graph-input audit contract changed.")
+    required_identity_audit = {
+        "canonical_graph_fold": "A",
+        "reconstruction": "per_edge_source_row_join",
+        "prepared_endpoint_columns": ["src_endpoint", "dst_endpoint"],
+        "require_exact_prepared_artifact_hash": True,
+        "require_bijective_id_endpoint_mapping": True,
+        "require_all_graph_nodes_resolved": True,
+        "require_first_seen_rows_match": True,
+        "require_reconstructed_contract_hash_match_both_folds": True,
+        "persist_lookup_outside_model_inputs": True,
+        "model_loader_access": False,
+    }
+    if contract.get("identity_audit") != required_identity_audit:
+        raise ValueError("The Stage-2 node-identity audit contract changed.")
     return contract
 
 
@@ -853,8 +867,9 @@ def save_capture_graph_input_audit(
     report: dict,
     *,
     contract_path: str | Path,
+    identity_lookups: dict[str, object],
 ) -> None:
-    """Persist one immutable Stage-2 input audit and its completion hash."""
+    """Persist one immutable Stage-2 input audit and diagnostic identity lookups."""
     output_dir = Path(output_dir)
     contract_path = Path(contract_path)
     if output_dir.exists():
@@ -862,6 +877,41 @@ def save_capture_graph_input_audit(
     output_dir.mkdir(parents=True)
     if sha256_file(contract_path) != report.get("input_contract_sha256"):
         raise ValueError("The saved graph-input audit has a different contract hash.")
+    identity_report = report.get("identity_audit", {})
+    if (
+        report.get("mode") != "FULL"
+        or identity_report.get("status") != "passed"
+        or identity_report.get("raw_identity_lookup_is_model_input") is not False
+        or set(identity_report.get("scenarios", {})) != set(identity_lookups)
+    ):
+        raise ValueError("A passed full identity audit is required before saving.")
+
+    lookup_dir = output_dir / "node_identity_lookup"
+    lookup_dir.mkdir()
+    lookup_checksums = {}
+    required_columns = [
+        "scenario",
+        "global_node_id",
+        "mac_address",
+        "first_seen_source_row_id",
+        "first_seen_role",
+    ]
+    for scenario in sorted(identity_lookups):
+        table = identity_lookups[scenario]
+        if list(table.columns) != required_columns or set(table["scenario"]) != {scenario}:
+            raise ValueError(f"Invalid identity lookup table: {scenario}")
+        relative = f"node_identity_lookup/{scenario}.parquet"
+        path = output_dir / relative
+        table.to_parquet(path, index=False, compression="zstd")
+        checksum = sha256_file(path)
+        lookup_checksums[relative] = checksum
+        identity_report["scenarios"][scenario]["lookup_artifact"] = relative
+        identity_report["scenarios"][scenario]["lookup_sha256"] = checksum
+    lookup_checksum_path = lookup_dir / "artifact_checksums.json"
+    write_json(lookup_checksum_path, lookup_checksums)
+    identity_report["lookup_artifact_checksums_sha256"] = sha256_file(
+        lookup_checksum_path
+    )
     shutil.copyfile(contract_path, output_dir / contract_path.name)
     report_path = output_dir / "capture_graph_input_audit.json"
     write_json(report_path, report)
@@ -871,6 +921,9 @@ def save_capture_graph_input_audit(
             "complete": True,
             "mode": report["mode"],
             "report_sha256": sha256_file(report_path),
+            "identity_lookup_checksums_sha256": identity_report[
+                "lookup_artifact_checksums_sha256"
+            ],
         },
     )
 
@@ -893,12 +946,22 @@ def load_completed_capture_graph_input_audit(
         "input_contract_sha256": sha256_file(collection.contract_path),
         "loader_code_sha256": sha256_file(Path(__file__)),
     }
+    from . import capture_graph_identity
+
+    identity_report = report.get("identity_audit", {})
+    expected_identity_code_sha256 = sha256_file(Path(capture_graph_identity.__file__))
     if (
         status.get("complete") is not True
         or status.get("mode") != mode
         or status.get("report_sha256") != sha256_file(report_path)
         or report.get("status") != "passed"
         or any(report.get(name) != value for name, value in expected.items())
+        or identity_report.get("status") != "passed"
+        or identity_report.get("identity_audit_code_sha256")
+        != expected_identity_code_sha256
+        or identity_report.get("raw_identity_lookup_is_model_input") is not False
+        or identity_report.get("cross_fold_mapping_contracts_match") is not True
+        or set(identity_report.get("scenarios", {})) != set(collection.scenarios)
     ):
         raise ValueError("The completed graph-input audit has a different binding.")
     archived_contract = output_dir / collection.contract_path.name
@@ -907,4 +970,30 @@ def load_completed_capture_graph_input_audit(
         or sha256_file(archived_contract) != expected["input_contract_sha256"]
     ):
         raise ValueError("The archived graph-input contract changed.")
+    lookup_checksum_path = output_dir / "node_identity_lookup" / "artifact_checksums.json"
+    lookup_checksums = _load_json(
+        lookup_checksum_path, "node-identity lookup checksums"
+    )
+    if (
+        sha256_file(lookup_checksum_path)
+        != identity_report.get("lookup_artifact_checksums_sha256")
+        or status.get("identity_lookup_checksums_sha256")
+        != identity_report.get("lookup_artifact_checksums_sha256")
+    ):
+        raise ValueError("The node-identity lookup checksum manifest changed.")
+    for scenario, scenario_report in identity_report["scenarios"].items():
+        relative = scenario_report.get("lookup_artifact")
+        expected_checksum = scenario_report.get("lookup_sha256")
+        path = output_dir / str(relative)
+        if (
+            scenario_report.get("status") != "passed"
+            or scenario_report.get("id_to_mac_conflicts") != 0
+            or scenario_report.get("mac_to_id_conflicts") != 0
+            or scenario_report.get("unresolved_global_nodes") != 0
+            or scenario_report.get("reconstructed_contract_matches_both_folds") is not True
+            or lookup_checksums.get(relative) != expected_checksum
+            or not path.is_file()
+            or sha256_file(path) != expected_checksum
+        ):
+            raise ValueError(f"Invalid completed node-identity audit: {scenario}")
     return report
