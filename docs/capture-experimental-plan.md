@@ -13,6 +13,17 @@ It is to test, without data leakage, whether temporal and/or structural context
 provides useful and earlier attack-chain detection than current-packet
 features alone.
 
+Graph-pilot boundary update (2026-09-28): the immutable graph materialization
+run `20260928T175821_521784Z_graph_materialization_full_dev` and graph-input
+audit run `20260928T193308_017682Z_graph_input_full` passed their development
+checks. The latter reconstructed a conflict-free scenario-scoped global-node-ID
+to MAC mapping from every edge's `source_row_id` and matched the semantic
+mapping hash stored by both folds. The next read-only gate is the chronological
+training preflight. Its frozen candidates are 20%, 25%, and 30% validation
+tails, selected without model scores and only when every development scenario
+passes the declared iteration-integrity and support requirements. No graph
+model training or held-out access has been authorized by these gates.
+
 Status as of 2026-09-20:
 
 - benign-background provenance has been audited from the authors' notebooks;

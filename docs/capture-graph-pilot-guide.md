@@ -362,6 +362,34 @@ was regenerated independently with a different ID permutation.
 Temporal state must be reset between the scenario datasets. A single loader
 spanning multiple scenarios without an explicit reset is outside the contract.
 
+### 4.9 Training preflight and inner-checkpoint split
+
+Before implementing the optimizer, run
+[`capture_graph_training_preflight.ipynb`](../code/python/notebook/capture_graph_training_preflight.ipynb)
+under
+[`capture_graph_training_preflight_v1.yaml`](../configs/capture_graph_training_preflight_v1.yaml).
+This preflight performs no optimization and never uses an outer-validation
+scenario to choose a split.
+
+The split is scenario-local and chronological. The training portion contains
+windows strictly before the boundary; the inner-checkpoint portion contains
+windows at or after it. Candidate validation tails are considered in the
+predeclared order 20%, 25%, and 30%. For each candidate, the boundary may move
+by at most 2% of the scenario wall-clock span to the closest boundary that does
+not divide an `(attack_step, sequence_id)` iteration. A candidate is selected
+only if it passes the declared packet-label, window, iteration, and step
+minimums for every development scenario. Thus all folds use one common target
+tail fraction, although their exact iteration-safe window boundaries may
+differ.
+
+The preflight also verifies prepared-packet/graph counts at each boundary and
+runs inference-only synthetic forward checks for every planned variant. It
+must demonstrate one finite logit per edge, unchanged shared inputs, temporal
+state creation, and complete scenario reset. A passing run remains
+`review_required` until its descriptive split tables are approved manually.
+Approval freezes the inner split and authorizes the full training contract and
+runner to be implemented; it does not itself authorize optimization.
+
 ## 5. Stage 2: one-seed development comparison
 
 ### 5.1 Minimum matrix
@@ -626,6 +654,8 @@ given to the model.
 - [ ] SMOKE and FULL_DEV graph materialization passed all cross-fold invariants.
 - [ ] The immutable FULL_DEV materialization run ID is recorded.
 - [ ] The Stage-2 sample and full graph-input audits passed.
+- [ ] The training preflight and its manual decision are complete and bound to
+      the reviewed graph-input audit.
 - [ ] Training and validation datasets are selected only through declared fold roles.
 - [ ] Exact configurations and minimum effect sizes are versioned.
 - [ ] The chronological inner split or fixed-epoch alternative is frozen.

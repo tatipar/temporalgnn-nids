@@ -1,0 +1,64 @@
+preflight_version: 1
+experiment_id: capture_graph_training_preflight_v1
+scope: development_only
+stage: stage2_training_preflight
+
+bindings:
+  prepared_run_id: 20260917T235058_827743Z_prepare_full_dev
+  graph_materialization_run_id: 20260928T175821_521784Z_graph_materialization_full_dev
+  graph_input_audit_run_id: 20260928T193308_017682Z_graph_input_full
+  graph_input_contract: capture_graph_stage2_input_v2.yaml
+  require_completed_identity_audit: true
+
+inner_split:
+  basis: scenario_wall_clock_window_index
+  training_condition: window_index_less_than_boundary
+  validation_condition: window_index_greater_than_or_equal_to_boundary
+  candidate_validation_tail_fractions: [0.20, 0.25, 0.30]
+  choose_first_candidate_valid_for_every_development_scenario: true
+  maximum_boundary_shift_fraction: 0.02
+  never_split_iteration_key: [attack_step, sequence_id]
+  minimums:
+    inner_train_nonempty_windows: 500
+    inner_validation_nonempty_windows: 500
+    inner_train_benign_only_windows: 100
+    inner_validation_benign_only_windows: 100
+    inner_train_attack_containing_windows: 100
+    inner_validation_attack_containing_windows: 100
+    inner_train_complete_attack_iterations: 10
+    inner_validation_complete_attack_iterations: 10
+    inner_train_distinct_attack_steps: 2
+    inner_validation_distinct_attack_steps: 2
+    require_both_packet_labels_in_each_partition: true
+
+checkpointing:
+  metric: unweighted_mean_scenario_average_precision
+  inner_validation_only: true
+  outer_validation_forbidden: true
+  thresholds_selected_during_checkpointing: false
+  scenario_order: declared_fold_order
+  graph_order: chronological
+  shuffle: false
+  reset_temporal_state_at_each_scenario_boundary: true
+  inner_validation_starts_with_empty_temporal_state: true
+
+model_contract:
+  edge_feature_dimension: 103
+  graph_batch_size: 1
+  node_features_x_allowed: false
+  one_logit_per_edge: true
+  variants:
+    - edge_mlp
+    - edge_gru
+    - static_gnn
+    - st_gnn
+    - st_gnn_without_gat
+    - st_gnn_without_direct_edge_attr
+  synthetic_forward_only: true
+  optimization_allowed: false
+
+prohibitions:
+  held_out_scenarios_accessed: false
+  model_training_performed: false
+  model_scores_used_to_choose_split: false
+  raw_endpoint_identity_is_model_input: false
