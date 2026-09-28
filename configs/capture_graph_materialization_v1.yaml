@@ -1,0 +1,56 @@
+materialization_version: 1
+experiment_id: capture_graph_materialization_v1
+scope: development_only
+stage: model_ready_graph_materialization
+
+windows:
+  duration_seconds: 5
+  type: fixed_non_overlapping
+  interval: left_closed_right_open
+  origin_rule: first_packet_timestamp_per_scenario
+  decision_time: window_end
+  empty_windows: do_not_materialize_preserve_index_gaps
+
+graph:
+  type: directed_temporal_multigraph
+  node_key: normalized_ethernet_mac_address
+  edge_unit: packet
+  preserve_parallel_edges: true
+  preserve_self_loops: true
+  persist_node_features_x: false
+  local_node_order: ascending_scenario_global_node_id
+  global_node_id_scope: scenario
+  global_node_id_assignment: deterministic_first_packet_appearance
+  raw_endpoint_identity_in_artifacts: false
+
+features:
+  view: fold_preprocessed_packet_features
+  dimension: 103
+  dtype: float32
+  fit_scope: current_fold_training_scenarios_only
+  materialize_all_development_scenarios_for_each_fold: true
+
+targets:
+  unit: edge
+  field: binary_label
+  dtype: uint8
+
+storage:
+  format: compressed_numpy_npz_shards
+  compression: zip_deflate
+  maximum_edges_per_shard: 250000
+  maximum_graphs_per_shard: 256
+  edge_index_dtype: int32
+  global_node_id_dtype: int32
+  pointer_dtype: int64
+  source_row_id_dtype: int64
+  window_time_dtype: int64
+  write_one_file_per_window: false
+
+alignment:
+  preserve_packet_order_within_scenario: true
+  persist_source_row_id_per_edge: true
+  require_one_edge_per_prepared_packet: true
+  require_identical_topology_across_folds: true
+  require_identical_labels_across_folds: true
+  require_identical_node_mapping_across_folds: true

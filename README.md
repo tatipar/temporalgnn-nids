@@ -10,6 +10,7 @@ the code used to compare edge-level intrusion-detection models.
 - [cAPTure experimental plan](docs/capture-experimental-plan.md)
 - [cAPTure graph-pilot guide](docs/capture-graph-pilot-guide.md)
 - [cAPTure graph structural-audit notebook](code/python/notebook/capture_graph_structural_audit.ipynb)
+- [cAPTure model-ready graph materialization notebook](code/python/notebook/capture_graph_materialization.ipynb)
 - [cAPTure Gate-0 CPU/Drive audit notebook](code/python/notebook/capture_data_gate0.ipynb)
 - [cAPTure canonical packet preparation notebook](code/python/notebook/capture_prepare.ipynb)
 - [cAPTure fold-aware feature profile notebook](code/python/notebook/capture_feature_profile.ipynb)

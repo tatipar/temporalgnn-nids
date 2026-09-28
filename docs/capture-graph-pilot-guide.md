@@ -35,6 +35,11 @@ Stage 1 runs through
 [`capture_graph_structural_audit.ipynb`](../code/python/notebook/capture_graph_structural_audit.ipynb)
 under the contract in
 [`capture_graph_structural_audit_v1.yaml`](../configs/capture_graph_structural_audit_v1.yaml).
+After the structural gate is recorded, model-ready development graphs are
+materialized through
+[`capture_graph_materialization.ipynb`](../code/python/notebook/capture_graph_materialization.ipynb)
+under
+[`capture_graph_materialization_v1.yaml`](../configs/capture_graph_materialization_v1.yaml).
 
 ## 2. Frozen contract for the entire pilot
 
@@ -253,6 +258,55 @@ MLP, or the existing causal summaries.
 Structural variation is a favorable condition, not proof that it is
 predictive. The Stage-2 ablations are required to decide whether topology is
 useful.
+
+### 4.7 Model-ready materialization after the gate
+
+When Stage 1 is recorded as `PASS_WITH_LIMITATIONS`, materialize the graph
+inputs before implementing or running training. This is a separate auditable
+stage; it must not refit preprocessing, select a model, or inspect held-out
+data.
+
+The materialization contract stores compressed NumPy shards rather than one
+file per window. Each shard contains concatenated arrays plus `edge_ptr` and
+`node_ptr`, so every graph can be reconstructed without losing its local node
+index. For every fold and development scenario it stores:
+
+- one directed edge, label, and `source_row_id` per prepared packet;
+- the 103-dimensional `float32` edge view produced by that fold's audited
+  training-only preprocessor;
+- local `edge_index`, scenario-scoped global node IDs, window index, window
+  boundaries, and decision time;
+- hashes for topology, labels, features, source-row order, node mapping, and
+  every shard.
+
+Raw endpoint identifiers, endpoint hashes, and node features are not persisted;
+the node-mapping table contains only global IDs and first-seen source rows. The
+same five scenario topologies are materialized under both fold preprocessors.
+Topology, labels, source rows, feature names, and the semantic node mapping
+must match exactly across folds; transformed feature values are allowed and
+expected to differ.
+
+Run materialization as `SMOKE` first and inspect its cross-fold invariants,
+storage, time, and peak memory. Approve `FULL_DEV` manually, then keep its run
+ID immutable: Stage 2 must consume these shards instead of rebuilding graphs
+inside each model implementation.
+
+The durable output is:
+
+```text
+graph_materialization_runs/<run_id>/
+  run_config.json
+  graph_materialization_manifest.json
+  run_status.json
+  fold_A/<scenario>/
+    graph_shard_*.npz
+    node_mapping.parquet
+    scenario_fold_report.json
+    artifact_checksums.json
+    run_status.json
+  fold_B/<scenario>/
+    ...
+```
 
 ## 5. Stage 2: one-seed development comparison
 
@@ -515,6 +569,8 @@ given to the model.
 ### Before training
 
 - [ ] Stage 1 has been reviewed and the structural gate documented.
+- [ ] SMOKE and FULL_DEV graph materialization passed all cross-fold invariants.
+- [ ] The immutable FULL_DEV materialization run ID is recorded.
 - [ ] Exact configurations and minimum effect sizes are versioned.
 - [ ] The chronological inner split or fixed-epoch alternative is frozen.
 - [ ] A synthetic contract check verifies packet-edge-output correspondence.
