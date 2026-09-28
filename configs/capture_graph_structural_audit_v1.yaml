@@ -1,0 +1,70 @@
+audit_version: 1
+experiment_id: capture_graph_structural_audit_v1
+scope: development_only
+stage: structural_audit_without_training
+
+windows:
+  duration_seconds: 5
+  type: fixed_non_overlapping
+  interval: left_closed_right_open
+  origin_rule: first_packet_timestamp_per_scenario
+  decision_time: window_end
+  empty_windows: count_for_exposure_but_do_not_materialize
+
+graph:
+  type: directed_temporal_multigraph
+  node_key: normalized_ethernet_mac_address
+  edge_unit: packet
+  preserve_parallel_edges: true
+  preserve_self_loops: true
+  weak_components: true
+  simple_density_excludes_self_loops: true
+  endpoint_values_in_outputs: sha256_only
+  materialize_training_graphs: false
+
+percentiles: [0, 1, 5, 25, 50, 75, 95, 99, 100]
+
+topology_metrics:
+  - nodes
+  - edges
+  - unique_directed_pairs
+  - unique_undirected_pairs
+  - weak_components
+  - largest_weak_component_fraction
+  - simple_directed_density
+  - mean_multiplicity
+  - max_multiplicity
+  - parallel_edge_fraction
+  - branching_node_fraction
+  - adjacent_node_jaccard
+  - adjacent_pair_jaccard
+  - previous_nonempty_node_jaccard
+  - previous_nonempty_pair_jaccard
+
+protocol_indicators:
+  - is_arp
+  - is_ipv4
+  - is_ipv6
+  - is_tcp
+  - is_udp
+  - is_mqtt
+  - is_ssh
+  - destination_is_broadcast
+  - destination_is_multicast
+
+node_roles: [unicast, multicast, broadcast]
+
+shortcut_rules:
+  - endpoint_seen_with_attack_in_fold_train
+  - endpoint_attack_only_in_fold_train
+  - directed_pair_seen_with_attack_in_fold_train
+  - directed_pair_attack_only_in_fold_train
+  - protocol_presence_direction_selected_on_fold_train
+
+resource_accounting:
+  model_edge_feature_count: 103
+  model_edge_feature_dtype_bytes: 4
+  topology_index_dtype_bytes: 8
+  target_dtype_bytes: 1
+  row_id_dtype_bytes: 8
+
