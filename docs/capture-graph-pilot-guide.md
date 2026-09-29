@@ -440,6 +440,42 @@ not required: two fitted preprocessors could theoretically produce identical
 tensors without violating the fit-scope contract. This stage performs no model
 optimization and requires a separate manual decision before runner binding.
 
+The completed immutable run is
+`20260929T134737_484622Z_graph_selection_materialization`, with manifest
+SHA-256
+`846d21671d6c657903427fefe665e8d1919c74859703a068a4940d02d8c09633`.
+It was approved for runner binding after all required alignment invariants
+passed. The approval explicitly leaves model training unauthorized.
+
+### 4.11 Training-runner binding and authorization
+
+Run
+[`capture_graph_training_binding.ipynb`](../code/python/notebook/capture_graph_training_binding.ipynb)
+under
+[`capture_graph_training_v1.yaml`](../configs/capture_graph_training_v1.yaml)
+before the first optimizer step. This gate stages and checksum-verifies both
+graph collections, reconstructs the exact graph ranges for inner training,
+inner validation, and the excluded suffix, and freezes twelve jobs: six models
+crossed with two folds.
+
+The contract deliberately reuses the existing untuned neural recipe: seed 42,
+hidden dimension 64, node projection dimension 16, dropout 0.2, AdamW with
+learning rate `0.001` and weight decay `0.00001`, and ten chronological graph
+windows per truncated-backpropagation block. Recurrent models use the primary
+timestamp-aware `exponential_decay` policy initialized to a 20-window
+half-life. These choices are fixed before graph-model scores and do not
+constitute a cAPTure hyperparameter search.
+
+The binding report also records separate scenario/class weights for epoch
+selection and complete-data refit. Each `(scenario, binary class)` cell has
+equal total training mass and the weights have mean one in their respective
+fit scope. Inner validation and outer validation remain unweighted.
+
+No model is instantiated by this gate. A manual
+`graph_training_authorization.json`, bound to the exact binding-report and
+job-plan hashes, is required before any backward pass. That authorization can
+permit only the development pilot; Test1 and Test2 remain prohibited.
+
 ## 5. Stage 2: one-seed development comparison
 
 ### 5.1 Minimum matrix
@@ -712,6 +748,8 @@ given to the model.
 - [ ] Exact configurations and minimum effect sizes are versioned.
 - [ ] The bounded chronological blocks and complete-data epoch-refit rule are frozen.
 - [ ] Inner-training-only selection features passed alignment review.
+- [ ] The runner-binding report and twelve-job plan passed manual review.
+- [ ] Training authorization is bound to the exact binding-report and job-plan hashes.
 - [ ] A synthetic contract check verifies packet-edge-output correspondence.
 - [ ] A synthetic contract check verifies resets, gaps, and temporal order.
 - [ ] Every variant receives the same feature view.

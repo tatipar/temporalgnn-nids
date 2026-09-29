@@ -1,0 +1,184 @@
+training_contract_version: 1
+experiment_id: capture_graph_one_seed_pilot_v1
+scope: development_only
+stage: stage2_one_seed_graph_training
+
+bindings:
+  prepared_run_id: 20260917T235058_827743Z_prepare_full_dev
+  graph_materialization_run_id: 20260928T175821_521784Z_graph_materialization_full_dev
+  graph_input_audit_run_id: 20260928T193308_017682Z_graph_input_full
+  training_preflight_run_id: 20260929T131750_353987Z_graph_training_preflight_v2
+  training_preflight_report_sha256: 478b6c4cae0ee27595c2ddd7fea73e2c0c3914f14c78f60ac4534af77badafed
+  selection_materialization_run_id: 20260929T134737_484622Z_graph_selection_materialization
+  selection_materialization_manifest_sha256: 846d21671d6c657903427fefe665e8d1919c74859703a068a4940d02d8c09633
+  graph_input_contract: capture_graph_stage2_input_v2.yaml
+  training_preflight_contract: capture_graph_training_preflight_v2.yaml
+  selection_materialization_contract: capture_graph_selection_materialization_v1.yaml
+
+folds:
+  A:
+    train: [train_empty_conn, train_qos_mid]
+    outer_validation: [train_dollar_char, train_slash_char, train_sub_exf]
+  B:
+    train: [train_dollar_char, train_slash_char, train_sub_exf]
+    outer_validation: [train_empty_conn, train_qos_mid]
+
+models:
+  order:
+    - edge_mlp
+    - edge_gru
+    - static_gnn
+    - st_gnn
+    - st_gnn_without_gat
+    - st_gnn_without_direct_edge_attr
+  common:
+    edge_dim: 103
+    hidden_dim: 64
+    node_dim: 16
+    dropout: 0.2
+    output_bias_init: null
+    identity_mode: current
+    window_ms: 5000
+  temporal_memory:
+    policy: exponential_decay
+    time_scale_ms: 5000
+    decay_half_life_windows: 20.0
+    max_gap_ms: null
+  variants:
+    edge_mlp:
+      class: SimpleMLP
+      temporal: false
+      temporal_memory_policy: none
+      use_topology: false
+      use_memory: false
+      use_direct_edge_attr: true
+    edge_gru:
+      class: EdgeGRU_Baseline_NoX
+      temporal: true
+      temporal_memory_policy: exponential_decay
+      use_topology: false
+      use_memory: true
+      use_direct_edge_attr: true
+    static_gnn:
+      class: StaticGNN_Identity
+      temporal: false
+      temporal_memory_policy: none
+      use_topology: true
+      use_memory: false
+      use_direct_edge_attr: true
+    st_gnn:
+      class: ST_GNN_Identity
+      temporal: true
+      temporal_memory_policy: exponential_decay
+      use_topology: true
+      use_memory: true
+      use_direct_edge_attr: true
+    st_gnn_without_gat:
+      class: ST_GNN_Identity
+      temporal: true
+      temporal_memory_policy: exponential_decay
+      use_topology: false
+      use_memory: true
+      use_direct_edge_attr: true
+    st_gnn_without_direct_edge_attr:
+      class: ST_GNN_Identity
+      temporal: true
+      temporal_memory_policy: exponential_decay
+      use_topology: true
+      use_memory: true
+      use_direct_edge_attr: false
+
+optimization:
+  seed: 42
+  device: cuda
+  optimizer: adamw
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  maximum_gradient_norm: null
+  graph_batch_size: 1
+  truncated_backpropagation_windows: 10
+  shuffle: false
+  loss: per_edge_binary_cross_entropy_times_fold_local_scenario_class_weight
+  loss_normalization: sum_weighted_loss_divided_by_sum_edge_weights
+  class_weight_policy: equal_total_weight_per_scenario_and_binary_class_cell
+  class_weight_normalization: mean_inner_training_or_refit_weight_one
+  validation_weighting: none
+
+checkpoint_selection:
+  unit: model_and_fold
+  metric: unweighted_mean_scenario_average_precision
+  maximum_epochs: 60
+  minimum_epochs: 10
+  patience_epochs: 10
+  minimum_absolute_improvement: 0.0001
+  restore_best_epoch: true
+  threshold_selection: none
+  preprocessing_scope: approved_inner_training_prefixes
+  training_weight_scope: approved_inner_training_prefixes
+  validation_scope: approved_inner_validation_blocks
+  post_validation_suffix_used: false
+  outer_validation_used: false
+
+final_refit:
+  duration_source: selected_best_epoch_count_per_model_and_fold
+  reinitialize_model: true
+  reuse_seed: true
+  preprocessing_scope: complete_fold_training_scenarios
+  training_weight_scope: complete_fold_training_scenarios
+  include_inner_validation_and_post_validation: true
+  early_stopping: false
+  checkpoint_selection: false
+  outer_validation_access_during_refit: false
+  evaluate_outer_validation_after_refit: true
+
+sequence:
+  scenario_order: declared_fold_order
+  graph_order: chronological
+  reset_temporal_state_at_scenario_boundary: true
+  reset_temporal_state_at_epoch_boundary: true
+  reset_temporal_state_before_each_evaluation_scenario: true
+  inner_validation_starts_with_empty_temporal_state: true
+  outer_validation_starts_with_empty_temporal_state: true
+
+persistence:
+  job_unit: model_and_fold
+  one_active_job_at_a_time: true
+  epoch_boundary_resume: true
+  local_resume_checkpoint_every_epochs: 1
+  durable_resume_checkpoint_every_epochs: 5
+  completed_job_is_immutable: true
+  oof_score_format: parquet
+  oof_score_fields:
+    - model
+    - fold
+    - scenario
+    - packet_id
+    - source_row_id
+    - window_index
+    - window_start_ns
+    - window_end_ns
+    - decision_time_ns
+    - packet_timestamp_ns
+    - binary_label
+    - attack_step
+    - sequence_id
+    - score
+  evaluation_metadata_joined_only_after_inference: true
+  raw_endpoint_identity_in_training_or_score_artifacts: false
+
+pilot_decision:
+  practical_average_precision_margin: 0.005
+  practical_timely_iteration_coverage_margin: 0.02
+  primary_false_alert_windows_per_hour: 1.0
+  topology_claim_requires_direct_ablation_support: true
+  one_seed_results_are_exploratory: true
+  maximum_peak_host_ram_gib: 12.0
+  maximum_peak_device_memory_gib: 14.0
+  maximum_inference_seconds_per_million_packets: 600.0
+  maximum_shifted_origin_absolute_coverage_drop: 0.02
+
+authorization:
+  runner_binding_report_required: true
+  manual_training_authorization_required: true
+  model_training_authorized_by_this_file: false
+  held_out_scenarios_accessed: false

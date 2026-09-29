@@ -41,6 +41,17 @@ rematerializes only the five fold-training scenario sequences. Its topology,
 targets, source rows, and node mappings must match the reviewed complete-fold
 materialization before the training runner can consume it.
 
+Selection-materialization update (2026-09-29): immutable run
+`20260929T134737_484622Z_graph_selection_materialization` passed and was
+approved for runner binding. Its manifest SHA-256 is
+`846d21671d6c657903427fefe665e8d1919c74859703a068a4940d02d8c09633`.
+All five sequences conserve topology, targets, source rows, node mappings,
+graph counts, and edge counts relative to the complete-fold collection. Their
+feature hashes differ as expected because their preprocessors were fitted only
+on the approved inner-training prefixes. The next gate freezes and audits the
+twelve model/fold jobs. Optimization remains prohibited until that binding
+report receives a separate manual authorization.
+
 Status as of 2026-09-20:
 
 - benign-background provenance has been audited from the authors' notebooks;
