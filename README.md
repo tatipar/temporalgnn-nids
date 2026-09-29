@@ -13,6 +13,7 @@ the code used to compare edge-level intrusion-detection models.
 - [cAPTure model-ready graph materialization notebook](code/python/notebook/capture_graph_materialization.ipynb)
 - [cAPTure Stage-2 graph-input audit notebook](code/python/notebook/capture_graph_input_audit.ipynb)
 - [cAPTure Stage-2 training-preflight v2 notebook](code/python/notebook/capture_graph_training_preflight.ipynb)
+- [cAPTure selection-feature materialization notebook](code/python/notebook/capture_graph_selection_materialization.ipynb)
 - [cAPTure Gate-0 CPU/Drive audit notebook](code/python/notebook/capture_data_gate0.ipynb)
 - [cAPTure canonical packet preparation notebook](code/python/notebook/capture_prepare.ipynb)
 - [cAPTure fold-aware feature profile notebook](code/python/notebook/capture_feature_profile.ipynb)

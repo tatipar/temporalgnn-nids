@@ -415,6 +415,31 @@ state creation, and complete scenario reset. A passing run remains
 Approval freezes the inner split and authorizes the full training contract and
 runner to be implemented; it does not itself authorize optimization.
 
+### 4.10 Selection-feature materialization
+
+The approved preflight run is
+`20260929T131750_353987Z_graph_training_preflight_v2`, with report SHA-256
+`478b6c4cae0ee27595c2ddd7fea73e2c0c3914f14c78f60ac4534af77badafed`.
+Before implementing optimization, run
+[`capture_graph_selection_materialization.ipynb`](../code/python/notebook/capture_graph_selection_materialization.ipynb)
+under
+[`capture_graph_selection_materialization_v1.yaml`](../configs/capture_graph_selection_materialization_v1.yaml).
+
+This data-only stage fits one preprocessor per fold using only the approved
+inner-training prefixes. It materializes complete sequences only for that
+fold's training scenarios so the runner can later slice the inner-training and
+validation blocks without rebuilding topology. The post-validation suffix is
+transformed for alignment auditing but remains forbidden during epoch
+selection. Outer-validation scenarios are not rematerialized because their
+already reviewed complete-fold features are used only after the final refit.
+
+Every selection sequence must exactly match the complete-fold reference in
+graph count, edge count, topology hash, target hash, source-row hash, and node
+mapping contract hash. A feature hash difference is recorded diagnostically,
+not required: two fitted preprocessors could theoretically produce identical
+tensors without violating the fit-scope contract. This stage performs no model
+optimization and requires a separate manual decision before runner binding.
+
 ## 5. Stage 2: one-seed development comparison
 
 ### 5.1 Minimum matrix
@@ -686,6 +711,7 @@ given to the model.
 - [ ] Training and validation datasets are selected only through declared fold roles.
 - [ ] Exact configurations and minimum effect sizes are versioned.
 - [ ] The bounded chronological blocks and complete-data epoch-refit rule are frozen.
+- [ ] Inner-training-only selection features passed alignment review.
 - [ ] A synthetic contract check verifies packet-edge-output correspondence.
 - [ ] A synthetic contract check verifies resets, gaps, and temporal order.
 - [ ] Every variant receives the same feature view.

@@ -33,6 +33,14 @@ and training weights are fit on inner-training prefixes during epoch selection
 and refit on all fold-training scenarios for the final model. No graph-model
 training or held-out access has been authorized by these gates.
 
+Training-preflight update (2026-09-29): immutable run
+`20260929T131750_353987Z_graph_training_preflight_v2` passed and was approved.
+All five scenarios selected an iteration-safe 20% block. The next data-only
+gate fits preprocessing on the approved inner-training prefixes and
+rematerializes only the five fold-training scenario sequences. Its topology,
+targets, source rows, and node mappings must match the reviewed complete-fold
+materialization before the training runner can consume it.
+
 Status as of 2026-09-20:
 
 - benign-background provenance has been audited from the authors' notebooks;

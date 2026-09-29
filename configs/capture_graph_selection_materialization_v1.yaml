@@ -1,0 +1,58 @@
+selection_materialization_version: 1
+experiment_id: capture_graph_selection_materialization_v1
+scope: development_only
+stage: stage2_selection_feature_materialization
+
+bindings:
+  prepared_run_id: 20260917T235058_827743Z_prepare_full_dev
+  graph_materialization_run_id: 20260928T175821_521784Z_graph_materialization_full_dev
+  graph_input_audit_run_id: 20260928T193308_017682Z_graph_input_full
+  training_preflight_run_id: 20260929T131750_353987Z_graph_training_preflight_v2
+  training_preflight_report_sha256: 478b6c4cae0ee27595c2ddd7fea73e2c0c3914f14c78f60ac4534af77badafed
+  graph_input_contract: capture_graph_stage2_input_v2.yaml
+  preprocessing_contract: capture_preprocessing_v1.yaml
+
+preprocessing:
+  fit_scope: inner_train_prefixes_only
+  one_preprocessor_per_fold: true
+  feature_dimension: 103
+  validation_block_used_for_fit: false
+  post_validation_suffix_used_for_fit: false
+  fit_batch_size: 100000
+
+materialization:
+  scenarios: fold_training_only
+  include_complete_scenario_for_alignment: true
+  training_runner_must_slice_using_preflight_boundaries: true
+  outer_validation_scenarios_materialized: false
+  held_out_scenarios_accessed: false
+  training_performed: false
+
+windows:
+  duration_seconds: 5
+  type: fixed_non_overlapping
+  interval: left_closed_right_open
+  origin_rule: first_packet_timestamp_per_scenario
+  decision_time: window_end
+  empty_windows: do_not_materialize_preserve_index_gaps
+
+storage:
+  format: compressed_numpy_npz_shards
+  compression: zip_deflate
+  maximum_edges_per_shard: 250000
+  maximum_graphs_per_shard: 256
+  edge_index_dtype: int32
+  global_node_id_dtype: int32
+  pointer_dtype: int64
+  source_row_id_dtype: int64
+  window_time_dtype: int64
+  write_one_file_per_window: false
+
+required_invariants:
+  topology_matches_full_fold_materialization: true
+  targets_match_full_fold_materialization: true
+  source_row_ids_match_full_fold_materialization: true
+  node_mapping_matches_full_fold_materialization: true
+  graph_and_edge_counts_match_prepared_packets: true
+  transformed_values_are_finite: true
+  raw_endpoint_identity_in_model_artifacts: false
