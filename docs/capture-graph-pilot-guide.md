@@ -476,6 +476,14 @@ No model is instantiated by this gate. A manual
 job-plan hashes, is required before any backward pass. That authorization can
 permit only the development pilot; Test1 and Test2 remain prohibited.
 
+The approved binding run is
+`20260929T144234_934044Z_graph_training_binding`. Its binding-report SHA-256 is
+`710593fe1a10cbe2342fe6a4dc52c3fa971eeff90bdae6edacb6f3d333457995`
+and its job-plan SHA-256 is
+`c3d64778323832919ad1f778d42a50a4d626ae80ee6c074bddc0e45cff5407c8`.
+The associated authorization permits the one-seed development jobs and
+explicitly denies held-out-scenario access.
+
 ## 5. Stage 2: one-seed development comparison
 
 ### 5.1 Minimum matrix
@@ -523,6 +531,12 @@ and label it as a separate experiment.
 
 ### 5.3 Training and persistence
 
+The executable Colab entry point is
+[`capture_graph_training.ipynb`](../code/python/notebook/capture_graph_training.ipynb).
+It runs one `model + fold` job at a time and defaults to a no-op until
+`RUN_TRAINING=True` is set. Start with `edge_mlp__fold_A`; use its measured
+cost to schedule the rest of the matrix.
+
 For every fold/model combination:
 
 1. set seed `42` for Python, NumPy, PyTorch, and CUDA;
@@ -537,6 +551,14 @@ For every fold/model combination:
 8. run inference exactly once on every outer scenario;
 9. persist one score per packet with its temporal and evaluation keys;
 10. record duration, peak RAM/VRAM, parameter count, and checkpoint size.
+
+Each job persists local recovery state after every epoch and a durable Drive
+recovery point every five epochs and at phase completion. Recovery is allowed
+only when the job contract, binding report, authorization, data manifests,
+training configuration, and runner code hashes still match. Selection weights
+are never reused: the runner instantiates a fresh seed-42 model for the
+complete-data refit. Outer-fold graph tensors and evaluation metadata are read
+only after that refit checkpoint exists.
 
 Non-temporal models may shuffle examples for optimization only if the example
 set and weights remain unchanged. For inference comparability, every model is

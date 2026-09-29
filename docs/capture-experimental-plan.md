@@ -52,6 +52,17 @@ on the approved inner-training prefixes. The next gate freezes and audits the
 twelve model/fold jobs. Optimization remains prohibited until that binding
 report receives a separate manual authorization.
 
+Training-runner update (2026-09-29): binding run
+`20260929T144234_934044Z_graph_training_binding` passed review and received a
+development-only training authorization. The authorization is bound to runner
+report SHA-256
+`710593fe1a10cbe2342fe6a4dc52c3fa971eeff90bdae6edacb6f3d333457995`
+and twelve-job plan SHA-256
+`c3d64778323832919ad1f778d42a50a4d626ae80ee6c074bddc0e45cff5407c8`.
+It does not authorize held-out-scenario access. The resumable runner begins
+with `edge_mlp__fold_A`; its measured epoch, refit, inference, RAM, and VRAM
+costs must be reviewed before scheduling the remaining eleven jobs.
+
 Status as of 2026-09-20:
 
 - benign-background provenance has been audited from the authors' notebooks;
