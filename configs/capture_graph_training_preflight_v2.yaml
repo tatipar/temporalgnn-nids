@@ -1,0 +1,90 @@
+preflight_version: 2
+experiment_id: capture_graph_training_preflight_v2
+scope: development_only
+stage: stage2_training_preflight
+
+bindings:
+  prepared_run_id: 20260917T235058_827743Z_prepare_full_dev
+  graph_materialization_run_id: 20260928T175821_521784Z_graph_materialization_full_dev
+  graph_input_audit_run_id: 20260928T193308_017682Z_graph_input_full
+  graph_input_contract: capture_graph_stage2_input_v2.yaml
+  require_completed_identity_audit: true
+
+inner_split:
+  basis: latest_admissible_chronological_block_per_scenario
+  training_condition: window_index_less_than_validation_start
+  validation_condition: validation_start_less_than_or_equal_to_window_index_less_than_validation_end
+  post_validation_condition: window_index_greater_than_or_equal_to_validation_end
+  candidate_validation_block_fractions: [0.20, 0.25]
+  choose_smallest_fraction_then_latest_admissible_block: true
+  never_split_iteration_key: [attack_step, sequence_id]
+  post_validation_data_used_during_epoch_selection: false
+  minimums:
+    inner_train_nonempty_windows: 500
+    inner_validation_nonempty_windows: 500
+    inner_train_benign_only_windows: 100
+    inner_validation_benign_only_windows: 100
+    inner_train_attack_containing_windows: 100
+    inner_validation_attack_containing_windows: 100
+    inner_train_complete_attack_iterations: 10
+    inner_validation_complete_attack_iterations: 10
+    inner_train_distinct_attack_steps: 2
+    inner_validation_distinct_attack_steps: 2
+    require_both_packet_labels_in_each_partition: true
+
+checkpointing:
+  selection_unit: model_and_fold
+  metric: unweighted_mean_scenario_average_precision
+  maximum_epochs: 60
+  minimum_epochs: 10
+  patience_epochs: 10
+  minimum_absolute_improvement: 0.0001
+  restore_best_epoch: true
+  preprocessing_fit_scope: inner_train_prefixes_only
+  training_weight_fit_scope: inner_train_prefixes_only
+  inner_validation_only: true
+  outer_validation_forbidden: true
+  thresholds_selected_during_checkpointing: false
+  scenario_order: declared_fold_order
+  graph_order: chronological
+  shuffle: false
+  reset_temporal_state_at_each_scenario_boundary: true
+  reset_temporal_state_at_each_epoch: true
+  inner_validation_starts_with_empty_temporal_state: true
+
+final_refit:
+  selection_output: best_epoch_count
+  one_epoch_count_per_model_and_fold: true
+  reinitialize_model: true
+  reuse_declared_seed: true
+  use_complete_fold_training_scenarios: true
+  preprocessing_fit_scope: complete_fold_training_scenarios
+  training_weight_fit_scope: complete_fold_training_scenarios
+  include_inner_validation_data: true
+  include_post_validation_data: true
+  epochs: selected_best_epoch_count
+  early_stopping: false
+  checkpoint_selection: false
+  outer_validation_access_during_refit: false
+  evaluate_outer_validation_after_refit: true
+
+model_contract:
+  edge_feature_dimension: 103
+  graph_batch_size: 1
+  node_features_x_allowed: false
+  one_logit_per_edge: true
+  variants:
+    - edge_mlp
+    - edge_gru
+    - static_gnn
+    - st_gnn
+    - st_gnn_without_gat
+    - st_gnn_without_direct_edge_attr
+  synthetic_forward_only: true
+  optimization_allowed: false
+
+prohibitions:
+  held_out_scenarios_accessed: false
+  model_training_performed: false
+  model_scores_used_to_choose_split: false
+  raw_endpoint_identity_is_model_input: false

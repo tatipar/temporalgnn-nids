@@ -97,18 +97,23 @@ select the epoch or checkpoint.
 For each fold and each training scenario:
 
 1. order windows chronologically;
-2. reserve a final internal segment, at complete window boundaries, only for
-   checkpointing;
-3. train on the preceding segment;
-4. select the epoch with the frozen internal metric;
-5. restore that checkpoint once;
-6. evaluate the outer scenarios without readjusting weights, epoch, or
+2. select the latest admissible chronological validation block using the
+   frozen per-scenario rule;
+3. train only on the prefix before that block while selecting the epoch;
+4. leave the suffix after that block unused during epoch selection;
+5. select one `best_epoch_count` per model and fold with the frozen internal
+   metric;
+6. discard the selection-run weights and reinitialize the same architecture
+   with the declared seed;
+7. train for exactly `best_epoch_count` epochs on all fold-training scenarios,
+   including the former validation block and excluded suffix;
+8. evaluate the outer scenarios without readjusting weights, epoch, or
    threshold.
 
-Freeze the internal fraction and metric before the first training run. If no
-internal segment with suitable classes and steps can be defined, a common
-fixed epoch count is cleaner than early stopping on the outer fold. The inner
-split is a checkpointing tool, not a third reportable generalization estimate.
+Freeze the block rule, metric, maximum epochs, minimum epochs, patience, and
+minimum improvement before the first training run. The inner split selects a
+training duration; it is not a third reportable generalization estimate. The
+outer scenarios remain inaccessible until the complete-data refit finishes.
 
 ## 4. Stage 1: structural audit without training
 
@@ -367,20 +372,40 @@ spanning multiple scenarios without an explicit reset is outside the contract.
 Before implementing the optimizer, run
 [`capture_graph_training_preflight.ipynb`](../code/python/notebook/capture_graph_training_preflight.ipynb)
 under
-[`capture_graph_training_preflight_v1.yaml`](../configs/capture_graph_training_preflight_v1.yaml).
+[`capture_graph_training_preflight_v2.yaml`](../configs/capture_graph_training_preflight_v2.yaml).
 This preflight performs no optimization and never uses an outer-validation
 scenario to choose a split.
 
-The split is scenario-local and chronological. The training portion contains
-windows strictly before the boundary; the inner-checkpoint portion contains
-windows at or after it. Candidate validation tails are considered in the
-predeclared order 20%, 25%, and 30%. For each candidate, the boundary may move
-by at most 2% of the scenario wall-clock span to the closest boundary that does
-not divide an `(attack_step, sequence_id)` iteration. A candidate is selected
-only if it passes the declared packet-label, window, iteration, and step
-minimums for every development scenario. Thus all folds use one common target
-tail fraction, although their exact iteration-safe window boundaries may
-differ.
+The v1 preflight run `20260928T201318_972670Z_graph_training_preflight`
+demonstrated that a common terminal tail is unsuitable: late benign-only
+periods leave some scenarios without enough attack support. The v2
+split remains scenario-local and chronological but uses a bounded block. For
+each scenario it first searches for the latest admissible block spanning 20%
+of wall-clock windows and falls back to 25% only when no 20% block passes. Both
+block boundaries must preserve every `(attack_step, sequence_id)` iteration.
+The training portion is the prefix before the block. The suffix after the block
+is excluded from checkpoint selection and is restored only during the final
+complete-data refit.
+
+Every selected block must pass the declared packet-label, window, complete
+iteration, and distinct-step minimums. Selection uses labels and iteration
+metadata only; it never uses model scores. The latest admissible location is
+chosen so the internal check remains as temporally late as the support
+constraints permit without expanding validation toward half the scenario.
+
+For each model and fold, checkpoint selection is capped at 60 epochs, cannot
+stop before 10 epochs, uses patience 10 and an absolute AP improvement of
+`0.0001`, and maximizes the unweighted mean scenario AP. The resulting
+one-based `best_epoch_count` is the only value transferred to the final refit;
+selection-run weights are not reused.
+
+The selection-run preprocessor and loss weights must be fit only on the
+inner-training prefixes. After `best_epoch_count` is frozen, the final-refit
+preprocessor and weights are fit again on all fold-training scenarios. The
+existing fold graph materialization remains authoritative for topology,
+labels, ordering, and complete-data refit features; separate selection feature
+tensors are required so the internal validation block and excluded suffix do
+not influence normalization or loss weighting.
 
 The preflight also verifies prepared-packet/graph counts at each boundary and
 runs inference-only synthetic forward checks for every planned variant. It
@@ -441,10 +466,12 @@ For every fold/model combination:
 
 1. set seed `42` for Python, NumPy, PyTorch, and CUDA;
 2. load only the fold-training scenarios;
-3. fit preprocessing and weights only on that set;
+3. fit selection preprocessing and weights only on the inner-training prefixes;
 4. train chronologically whenever temporal state exists;
-5. apply early stopping only to the predeclared inner segment;
-6. restore the best inner checkpoint;
+5. select `best_epoch_count` using only the predeclared inner blocks;
+6. reinitialize with the same seed, refit preprocessing and weights on all
+   fold-training scenarios, and train for exactly `best_epoch_count` epochs
+   without early stopping;
 7. reset all memory;
 8. run inference exactly once on every outer scenario;
 9. persist one score per packet with its temporal and evaluation keys;
@@ -658,7 +685,7 @@ given to the model.
       the reviewed graph-input audit.
 - [ ] Training and validation datasets are selected only through declared fold roles.
 - [ ] Exact configurations and minimum effect sizes are versioned.
-- [ ] The chronological inner split or fixed-epoch alternative is frozen.
+- [ ] The bounded chronological blocks and complete-data epoch-refit rule are frozen.
 - [ ] A synthetic contract check verifies packet-edge-output correspondence.
 - [ ] A synthetic contract check verifies resets, gaps, and temporal order.
 - [ ] Every variant receives the same feature view.

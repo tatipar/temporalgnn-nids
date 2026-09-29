@@ -19,10 +19,19 @@ audit run `20260928T193308_017682Z_graph_input_full` passed their development
 checks. The latter reconstructed a conflict-free scenario-scoped global-node-ID
 to MAC mapping from every edge's `source_row_id` and matched the semantic
 mapping hash stored by both folds. The next read-only gate is the chronological
-training preflight. Its frozen candidates are 20%, 25%, and 30% validation
-tails, selected without model scores and only when every development scenario
-passes the declared iteration-integrity and support requirements. No graph
-model training or held-out access has been authorized by these gates.
+training preflight. The v1 run
+`20260928T201318_972670Z_graph_training_preflight` showed that no common 20%,
+25%, or 30% terminal tail has adequate attack support in every development
+scenario. The v2
+preflight therefore searches independently for the latest admissible bounded
+validation block in each scenario, trying 20% before 25%, without model scores
+and without splitting attack iterations. The suffix after each block is
+excluded while selecting one `best_epoch_count` per model and fold. The model
+is then reinitialized with the declared seed and refit for that epoch count on
+all fold-training data before outer-fold evaluation. Preprocessing statistics
+and training weights are fit on inner-training prefixes during epoch selection
+and refit on all fold-training scenarios for the final model. No graph-model
+training or held-out access has been authorized by these gates.
 
 Status as of 2026-09-20:
 
