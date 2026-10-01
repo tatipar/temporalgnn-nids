@@ -554,6 +554,38 @@ checkpoints under a new versioned contract that preserves raw logits and a
 float64 sigmoid score. Retraining, refitting, and held-out-scenario access
 remain prohibited.
 
+### 5.1.3 Versioned OOF logit rescoring
+
+After a confirmed saturation audit, run
+[`capture_graph_oof_rescoring.ipynb`](../code/python/notebook/capture_graph_oof_rescoring.ipynb)
+under
+[`capture_graph_oof_rescoring_v1.yaml`](../configs/capture_graph_oof_rescoring_v1.yaml).
+The notebook repeats inference for the eight completed `model + fold` jobs and
+never invokes selection, refitting, an optimizer, or threshold search.
+
+Every rescored packet preserves four distinct values:
+
+- the immutable source float32 probability;
+- the newly recomputed float32 probability, used only for numerical-drift
+  verification;
+- the raw float32 logit produced by the checkpoint;
+- a sigmoid calculated from that logit in float64.
+
+The raw logit is the frozen ranking field for the corrected operational
+comparison. It is a monotonic score and therefore supports the same
+false-alert-budget procedure without the exact-one probability tie. The
+float64 probability remains available for interpretation, but it is not used
+as the primary operational field because even float64 sigmoid can eventually
+round to exactly one for sufficiently large logits.
+
+The run is resumable at scenario and `model + fold` boundaries. Each completed
+job is written beneath a unique rescoring run directory and bound to the
+source checkpoint, source OOF hashes, comparison report, saturation audit,
+graph materialization, inference code, and dependency hashes. The run is
+sealed only after all eight jobs pass exact row, target, window, and provenance
+checks. Existing training predictions and the original four-model comparison
+remain immutable evidence.
+
 ### 5.2 Experimental equality
 
 Before launching a run, a contract check must demonstrate that all variants

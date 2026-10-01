@@ -1,0 +1,63 @@
+rescoring_contract_version: 1
+experiment_id: capture_graph_oof_logit_rescoring_v1
+scope: development_only
+stage: stage2_outer_oof_inference_only
+
+bindings:
+  prepared_run_id: 20260917T235058_827743Z_prepare_full_dev
+  graph_materialization_run_id: 20260928T175821_521784Z_graph_materialization_full_dev
+  training_binding_run_id: 20260929T144234_934044Z_graph_training_binding
+  four_model_comparison_run_id: 20261001T153351_608797Z_graph_four_model_comparison
+  score_saturation_audit_run_id: 20261001T175306_830261Z_graph_score_saturation_audit
+  graph_input_contract: capture_graph_stage2_input_v2.yaml
+
+models:
+  - edge_mlp
+  - edge_gru
+  - static_gnn
+  - st_gnn
+
+folds:
+  A:
+    outer_validation:
+      - train_dollar_char
+      - train_slash_char
+      - train_sub_exf
+  B:
+    outer_validation:
+      - train_empty_conn
+      - train_qos_mid
+
+inference:
+  device: cuda
+  seed: 42
+  cudnn_deterministic: true
+  cudnn_benchmark: false
+  graph_order: chronological
+  shuffle: false
+  reset_temporal_state_before_each_scenario: true
+  warmup_graphs_excluded_from_timing: 1
+  source_score_type: float32
+  raw_logit_type: float32
+  recomputed_score_type: float32
+  high_resolution_score_type: float64
+  high_resolution_score_definition: sigmoid_of_float32_logit_computed_in_float64
+  operational_ranking_field: raw_logit
+  maximum_allowed_source_probability_absolute_difference: 0.00001
+
+output:
+  preserve_source_probability: true
+  preserve_recomputed_probability: true
+  preserve_raw_logit: true
+  preserve_float64_sigmoid: true
+  require_identical_packet_keys_and_labels: true
+  completed_job_is_immutable: true
+  job_unit: model_and_fold
+
+prohibitions:
+  model_training: true
+  optimizer_creation: true
+  checkpoint_modification: true
+  threshold_selection: true
+  held_out_scenario_access: true
+  source_artifact_overwrite: true
