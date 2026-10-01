@@ -533,6 +533,27 @@ claim remains prohibited until the matched ST-GNN control without GAT message
 passing is complete. The no-direct-edge-attribute control and shifted-origin
 sensitivity also remain pending.
 
+### 5.1.2 Score-saturation audit
+
+If a model combines near-ceiling ranking metrics with zero operational
+detections across the frozen false-alert budgets, do not interpret the result
+as model failure until score resolution is audited. Run
+[`capture_graph_score_saturation_audit.ipynb`](../code/python/notebook/capture_graph_score_saturation_audit.ipynb)
+against the immutable four-model comparison.
+
+The audit records packet and window-score tails, exact-zero and exact-one
+counts, distinct-score counts, maximum-score tie sizes, and the smallest
+positive false-alert rate attainable while including a benign top-score block.
+A saturation blocker requires a threshold above one, benign windows stored at
+exactly one whose top block exceeds the budget, and attack packets tied at the
+same stored score.
+
+The audit does not change a threshold or overwrite OOF predictions. If it
+confirms saturation, repeat only outer-fold inference from the immutable final
+checkpoints under a new versioned contract that preserves raw logits and a
+float64 sigmoid score. Retraining, refitting, and held-out-scenario access
+remain prohibited.
+
 ### 5.2 Experimental equality
 
 Before launching a run, a contract check must demonstrate that all variants
