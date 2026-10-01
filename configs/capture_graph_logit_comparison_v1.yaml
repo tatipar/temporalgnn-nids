@@ -1,0 +1,57 @@
+comparison_contract_version: 1
+experiment_id: capture_graph_logit_operational_comparison_v1
+scope: development_only
+stage: stage2_corrected_four_model_comparison
+
+bindings:
+  graph_rescoring_run_id: 20261001_graph_oof_logit_rescoring_v1
+  graph_rescoring_contract: capture_graph_oof_rescoring_v1.yaml
+  source_graph_comparison_run_id: 20261001T153351_608797Z_graph_four_model_comparison
+  score_saturation_audit_run_id: 20261001T175306_830261Z_graph_score_saturation_audit
+  xgb_operational_run_id: 20260923T153258_885662Z_operational_oof_v2_float64
+  xgb_early_warning_run_id: 20260923T155543_771684Z_early_warning_oof_v2_float64
+  xgb_p_run_id: 20260919T151844_852400Z_xgb_p
+  xgb_p_t_run_id: 20260919T201909_754628Z_xgb_p_t
+  xgb_p_t_ablation_run_id: 20260920T000745_916321Z_xgb_p_t_ablation
+
+graph_models:
+  - edge_mlp
+  - edge_gru
+  - static_gnn
+  - st_gnn
+
+xgb_benchmarks:
+  - xgb_p
+  - current_window
+  - history
+  - full
+
+scoring:
+  graph_ranking_field: raw_logit
+  graph_probability_diagnostic_field: score_float64
+  xgb_ranking_field: score
+  packet_threshold_rule: score_greater_than_or_equal_to_threshold
+  window_alert_rule: maximum_packet_score_greater_than_or_equal_to_threshold
+  threshold_tie_rule: nextafter_above_tied_benign_score
+  threshold_selection_scope: development_oof_only
+  primary_false_alert_budget: one_per_hour
+  sensitivity_budgets:
+    - one_per_12_hours
+    - one_per_5_minutes
+
+aggregation:
+  primary: equal_scenario_mean_within_fold_then_equal_fold_mean
+  threshold_constraint: maximum_fold_mean_false_alert_windows_per_hour
+  flat_scenario_macro_is_diagnostic_only: true
+
+interpretation:
+  xgb_is_external_development_benchmark_not_architecture_ablation: true
+  one_seed_results_are_exploratory: true
+  topology_claim_authorized: false
+
+prohibitions:
+  model_training: true
+  checkpoint_loading: true
+  threshold_selection_from_held_out_data: true
+  held_out_scenario_access: true
+  source_artifact_overwrite: true

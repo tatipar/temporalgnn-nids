@@ -591,6 +591,30 @@ sealed only after all eight jobs pass exact row, target, window, and provenance
 checks. Existing training predictions and the original four-model comparison
 remain immutable evidence.
 
+### 5.1.4 Corrected graph-logit comparison
+
+After the eight rescoring jobs are sealed, run
+[`capture_graph_logit_comparison.ipynb`](../code/python/notebook/capture_graph_logit_comparison.ipynb)
+under
+[`capture_graph_logit_comparison_v1.yaml`](../configs/capture_graph_logit_comparison_v1.yaml).
+This comparison uses raw logits for every graph ranking and operational
+threshold. It retains the original three false-alert budgets, packet metrics,
+iteration coverage, timely coverage, terminal-action coverage, and
+hierarchical fold/scenario aggregation.
+
+The report also validates and displays the existing XGB-P, current-window,
+history-only, and full XGB development results. Exact ordered packet keys,
+labels, timestamps, and window assignments must agree across the graph and XGB
+families. XGB remains an external benchmark: the packet and evaluation
+protocols are shared, but the architectures and feature representations are
+not identical, so graph-minus-XGB differences are not causal ablations.
+
+The corrected report records the change from stored float32 graph
+probabilities to raw logits. Its graph operational rows supersede the
+saturated EdgeGRU and ST-GNN rows in the original four-model report. The
+original report and saturation audit remain bound provenance for explaining
+why the correction was required.
+
 ### 5.2 Experimental equality
 
 Before launching a run, a contract check must demonstrate that all variants
