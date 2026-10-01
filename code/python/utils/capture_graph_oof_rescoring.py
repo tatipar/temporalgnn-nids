@@ -113,7 +113,7 @@ def load_graph_oof_rescoring_config(path: str | Path) -> dict:
             "sigmoid_of_float32_logit_computed_in_float64"
         ),
         "operational_ranking_field": "raw_logit",
-        "maximum_allowed_source_probability_absolute_difference": 0.00001,
+        "maximum_allowed_source_probability_absolute_difference": 0.0001,
     }
     if config.get("inference") != expected_inference:
         raise ValueError("The OOF inference contract changed.")

@@ -563,6 +563,11 @@ under
 The notebook repeats inference for the eight completed `model + fold` jobs and
 never invokes selection, refitting, an optimizer, or threshold search.
 
+The rescoring contract uses a `1e-4` hard bound for CUDA/PyG re-execution
+probability drift while requiring exact row, target, and window alignment. The
+difference remains reported per scenario; the bound does not select a model,
+score, threshold, or metric.
+
 Every rescored packet preserves four distinct values:
 
 - the immutable source float32 probability;

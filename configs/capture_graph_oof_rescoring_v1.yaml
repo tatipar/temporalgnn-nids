@@ -43,7 +43,7 @@ inference:
   high_resolution_score_type: float64
   high_resolution_score_definition: sigmoid_of_float32_logit_computed_in_float64
   operational_ranking_field: raw_logit
-  maximum_allowed_source_probability_absolute_difference: 0.00001
+  maximum_allowed_source_probability_absolute_difference: 0.0001
 
 output:
   preserve_source_probability: true
