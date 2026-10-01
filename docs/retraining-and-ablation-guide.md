@@ -76,7 +76,9 @@ Implemented primarily in commits `ae5ff17`, `f77ba58`, and `90b3765`:
   explicit gap policy;
 - exponential decay, hard reset, and carry-without-decay are implemented;
 - current and strict previous-window identity are configurable;
-- ST-GNN exposes no-memory, no-topology, and no-direct-edge-attribute controls;
+- ST-GNN exposes no-memory, no-GAT-message-passing, and
+  no-direct-edge-attribute controls; the no-GAT control still retains endpoint
+  aggregation and per-node memory;
 - E-GraphSAGE constructs its constant initial node state internally;
 - state resets prevent transfer between epochs and dataset splits;
 - temporal gaps, resets, and learned decay are recorded.
@@ -767,15 +769,15 @@ Use the primary profile selected before examining test results (by default,
 |---|---|---|
 | Full ST-GNN | fixed identity policy, GAT, and delta-time memory | Reference |
 | No memory | replace GRU/memory with current-window `z` | Does temporal history help? |
-| No topology | omit GAT; feed local edge aggregates to identity/GRU | Does GAT add value beyond local temporal state? |
+| No GAT message passing | omit GAT; feed local edge aggregates to identity/GRU | Does GAT add value beyond local temporal state? |
 | Lagged identity | use identity from `t-1` | Does target-edge participation in identity matter? |
 | No direct edge attributes in classifier | classifier sees endpoint embeddings only | How much does the direct `edge_attr` path contribute? |
 | Gap reset vs delta-time decay | compare temporal policies | Does elapsed time modelling matter? |
 
 The final two are important extra ablations: the direct feature shortcut and
 gap-handling policy. With limited compute, screen every variant with one seed,
-but repeat at least full, no-memory, no-topology, and lagged-identity variants
-with five seeds.
+but repeat at least full, no-memory, no-GAT-message-passing, and
+lagged-identity variants with five seeds.
 
 Do not treat MLP or EdgeGRU as substitutes for controlled ST-GNN ablations:
 they are essential baselines, but they change multiple factors simultaneously.

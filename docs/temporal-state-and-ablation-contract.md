@@ -103,7 +103,8 @@ Recommended confirmatory variants are:
 1. full ST-GNN with current identity and exponential decay;
 2. lagged identity;
 3. no memory;
-4. no topology;
+4. no GAT message passing (`use_topology=false`), while retaining endpoint
+   aggregation and any enabled per-node memory;
 5. no direct edge attributes;
 6. hard-reset and carry-without-decay gap-policy ablations.
 

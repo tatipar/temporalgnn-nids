@@ -497,7 +497,7 @@ weights, windows, and decision times.
 | EdgeGRU | `EdgeGRU_Baseline_NoX` | packet plus per-node memory | Does memory add value without GAT? |
 | StaticGNN | `StaticGNN_Identity` | packet plus current topology | Does current message passing add value without recurrent memory? |
 | ST-GNN | `ST_GNN_Identity` | packet plus topology plus memory | Do structure and time complement each other? |
-| ST-GNN without GAT | `ST_GNN_Identity(use_topology=false)` | packet plus endpoint aggregation plus memory, without GAT message passing | Main control for the topological layers |
+| ST-GNN without GAT message passing | `ST_GNN_Identity(use_topology=false)` | packet plus endpoint aggregation plus memory, without GAT message passing | Matched control for the GATv2 layers, not for all relational structure |
 | ST-GNN without direct `edge_attr` | `ST_GNN_Identity(use_direct_edge_attr=false)` | edge features only through identity/aggregation and GAT | Does the classifier depend on the direct packet shortcut? |
 
 The last variant is conditional on cost and runs only if declared before
@@ -510,6 +510,28 @@ edge aggregates when constructing node identity. Call it “without GAT” or
 `use_direct_edge_attr=false` does not remove packet features from identity
 construction or GAT messages. Edge MLP and EdgeGRU provide the controls without
 message passing needed for interpretation.
+
+### 5.1.1 Four-model interim comparison
+
+After both folds of Edge MLP, EdgeGRU, StaticGNN, and ST-GNN are complete, run
+[`capture_graph_four_model_comparison.ipynb`](../code/python/notebook/capture_graph_four_model_comparison.ipynb).
+The notebook verifies immutable job and OOF checksums, exact packet-key and
+label alignment, and development-only provenance before producing ranking,
+operational, early-warning, step, scenario, and resource tables.
+
+Packet F1 and F2 are derived from the confusion counts at each model's
+operational threshold; neither metric selects or changes a threshold. The
+one-false-alert-window-per-hour budget remains primary. The already frozen
+one-per-12-hours and one-per-five-minutes budgets are reported as sensitivity
+analyses and cannot replace the primary budget after results are inspected.
+
+This is an explicitly partial evaluation. `StaticGNN - Edge MLP` measures the
+current aggregation/message-passing signal without recurrent memory.
+`ST-GNN - EdgeGRU` is the corresponding temporal comparison, but residual
+architecture differences prevent a causal attribution. A topology-centered
+claim remains prohibited until the matched ST-GNN control without GAT message
+passing is complete. The no-direct-edge-attribute control and shifted-origin
+sensitivity also remain pending.
 
 ### 5.2 Experimental equality
 
@@ -592,7 +614,7 @@ confirmatory estimate.
 Report by model, fold, scenario, and step:
 
 - packet ROC-AUC and PR-AUC as diagnostics;
-- packet precision, recall, and FPR at the operational threshold;
+- packet precision, recall, F1, F2, and FPR at the operational threshold;
 - false-alert windows per hour;
 - total, detected, and missed iterations;
 - iteration coverage with a correct alert strictly before the final malicious
@@ -656,7 +678,7 @@ the primary origin retrospectively.
 | StaticGNN - Edge MLP | value of current aggregation/message passing | capacity and optimization may differ |
 | ST-GNN - StaticGNN | incremental value of memory with structure | requires aligned configurations |
 | ST-GNN - EdgeGRU | incremental value of GAT in a temporal model | does not perfectly isolate interactions |
-| ST-GNN - ST-GNN without GAT | value of GATv2 layers within one family | the control still uses endpoint aggregation |
+| ST-GNN - ST-GNN without GAT message passing | value of GATv2 layers within one family | the control still uses endpoint aggregation and per-node memory |
 | ST-GNN without direct `edge_attr` - ST-GNN | dependence on the classifier's direct shortcut | features remain in identity and messages |
 
 An AUC-only gain does not demonstrate operational utility. Relevant evidence
@@ -681,8 +703,8 @@ maximum_peak_ram_vram = [value]
 
 Only when all of the following hold:
 
-- StaticGNN or ST-GNN beats its non-topological control on a predeclared
-  operational metric at the same false-alert budget;
+- StaticGNN beats Edge MLP, or ST-GNN beats its no-GAT-message-passing control,
+  on a predeclared operational metric at the same false-alert budget;
 - the difference reaches the frozen minimum practical effect;
 - the sign does not depend on one scenario, step, or protocol;
 - the main conclusion survives the shifted origin;
@@ -694,10 +716,10 @@ pipeline. Test1 and Test2 remain closed.
 
 ### Evidence favors time but not topology
 
-If EdgeGRU improves over Edge MLP but StaticGNN/ST-GNN do not improve over the
-controls without GAT, prioritize temporal memory or the existing `history`
-baseline. The GNN may remain a secondary analysis rather than a central
-contribution.
+If EdgeGRU improves over Edge MLP but StaticGNN does not improve over Edge MLP
+and ST-GNN does not improve over its control without GAT message passing,
+prioritize temporal memory or the existing `history` baseline. The GNN may
+remain a secondary analysis rather than a central contribution.
 
 ### Topology should be deprioritized
 
@@ -796,7 +818,7 @@ given to the model.
 | Is there real node and link variation? | percentiles, Jaccard, repeated topologies |  |  |
 | Are there non-trivial neighborhoods? | components, largest component, degrees, multiplicity |  |  |
 | Are there MAC/protocol shortcuts? | rule and stratum audit |  |  |
-| Does topology improve timely coverage? | StaticGNN/MLP and ST-GNN/without GAT |  |  |
+| Does GAT message passing improve timely coverage? | StaticGNN/MLP and ST-GNN/without GAT message passing |  |  |
 | Does memory improve coverage or lead time? | EdgeGRU/MLP and ST-GNN/StaticGNN |  |  |
 | Does detection precede the terminal action? | terminal coverage and lead time |  |  |
 | Does it meet one false alert per hour? | worst fold mean |  |  |
