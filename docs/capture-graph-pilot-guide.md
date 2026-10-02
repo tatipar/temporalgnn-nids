@@ -615,6 +615,28 @@ saturated EdgeGRU and ST-GNN rows in the original four-model report. The
 original report and saturation audit remain bound provenance for explaining
 why the correction was required.
 
+### 5.1.5 Post-comparison logit-tail audit
+
+Run `code/python/notebook/capture_graph_logit_tail_audit.ipynb` after the
+corrected four-model comparison. It reads checksum-bound development OOF raw
+logits and prepared packet metadata on a CPU runtime. It does not load
+checkpoints or optimize models.
+
+The audit reports packet and window logit quantiles for benign and attack
+traffic by model, fold, and scenario. It reproduces the frozen one-false-alert
+window-per-hour global threshold exactly. Fold-local and scenario-local
+thresholds use the same OOF data for selection and evaluation, so their recall
+figures are diagnostic and optimistic; they never replace the global result.
+
+For ST-GNN, the ten highest-scoring benign windows in each scenario are joined
+to canonical packet metadata. The output includes protocol counts, distinct
+node and directed-pair counts, the triggering packet's protocol flags, and
+the multiplicity of the most frequent pair. MAC addresses are represented by
+hashes in the saved diagnostic table. The
+report can distinguish a score-scale mismatch between folds from persistent
+benign/attack tail overlap within a scenario, but cannot by itself identify a
+causal failure inside GAT or the GRU.
+
 ### 5.2 Experimental equality
 
 Before launching a run, a contract check must demonstrate that all variants

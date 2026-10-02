@@ -1,0 +1,29 @@
+audit_contract_version: 1
+experiment_id: capture_graph_logit_tail_audit_v1
+scope: development_only
+stage: post_comparison_score_tail_diagnostic
+
+bindings:
+  rescoring_run_id: 20261001_graph_oof_logit_rescoring_v1
+  corrected_comparison_run_id: 20261001_graph_logit_comparison_v1
+  prepared_run_id: 20260917T235058_827743Z_prepare_full_dev
+
+models: [edge_mlp, edge_gru, static_gnn, st_gnn]
+primary_model: st_gnn
+primary_budget: one_per_hour
+score_field: raw_logit
+threshold_rule: smallest_threshold_satisfying_one_false_alert_window_per_hour
+threshold_scopes: [frozen_global, fold_local_diagnostic, scenario_local_diagnostic]
+top_benign_windows_per_scenario: 10
+quantiles: [0.5, 0.9, 0.99, 0.999, 0.9999]
+
+interpretation:
+  local_thresholds_are_in_sample_diagnostics: true
+  local_thresholds_do_not_replace_frozen_global_threshold: true
+  no_model_selection_from_this_audit: true
+
+prohibitions:
+  model_training: true
+  checkpoint_loading: true
+  held_out_scenario_access: true
+  source_artifact_overwrite: true
