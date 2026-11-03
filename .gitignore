@@ -21,3 +21,7 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Paper: separate Overleaf git repository cloned here
+paper/
+paper_draft_local/
