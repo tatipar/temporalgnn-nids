@@ -6,11 +6,17 @@ edge features (20 log1p + train-fitted StandardScaler numeric features, 7-way po
 episode-aware cutoffs. Models: decision trees (depth 1, 2, 4, 8) and logistic regression, trained on
 Wednesday train only and scored on validation, Test 1 and Thursday Test 2. No graph, no history.
 
-Usage: python3 -I flow_baselines.py WED_DEDUP.csv THU_DEDUP.csv OUTPUT_DIR
+Usage: python3 -I flow_baselines.py WED.csv THU.csv OUTPUT_DIR [episode|historical]
+
+`episode` (default) uses the 15:44/16:56 UTC cutoffs; `historical` reproduces the fair-comparison
+70%/85%-of-day cutoffs, under which Test 1 has no corrected positives (its AP is reported as NaN).
+Inputs may be the deduplicated CSVs or the raw NF-v3 CSVs (targets are then added on the fly).
 """
 import json
 import os
 import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import numpy as np
 import pandas as pd
@@ -34,8 +40,8 @@ PORT_ROLES = ['port_web', 'port_admin', 'port_windows', 'port_infra', 'port_db',
 PROTOCOLS = ['proto_tcp', 'proto_udp', 'proto_icmp', 'proto_igmp', 'proto_other']
 FEATURES = PORT_ROLES + PROTOCOLS + NUMERIC_FEATURES
 WINDOW = pd.Timedelta(seconds=30)
-LIMIT_TRAIN = pd.Timestamp('2018-02-28 15:44:00')   # episode-aware cutoffs (see docs)
-LIMIT_VAL = pd.Timestamp('2018-02-28 16:56:00')
+SPLIT = sys.argv[4] if len(sys.argv) > 4 else 'episode'
+assert SPLIT in ('episode', 'historical'), SPLIT
 TARGETS = ['target_corrected', 'target_original']
 
 
@@ -57,15 +63,24 @@ def encode(df):
 
 def load(path):
     df = pd.read_csv(path)
+    if 'target_corrected' not in df:              # raw NF-v3 CSV: add both targets, keep duplicates
+        from utils.nfv3_relabel import relabel_chunk
+        df['target_original'] = df['Attack'].eq('Infilteration').astype('int8')
+        df['target_corrected'] = relabel_chunk(df)['binary_target'].astype('int8')
     df['FLOW_START_TIME'] = pd.to_datetime(df['FLOW_START_TIME'])
-    start = df['FLOW_START_TIME'].min()           # the builder uses all rows, before the IP filter
+    start, end = df['FLOW_START_TIME'].min(), df['FLOW_START_TIME'].max()  # all rows, before the IP filter
     df = df[(df.IPV4_SRC_ADDR != '0.0.0.0') & (df.IPV4_DST_ADDR != '0.0.0.0')]
     window_start = start + ((df['FLOW_START_TIME'] - start) // WINDOW) * WINDOW
-    return df, window_start
+    return df, window_start, start, end
 
 
-wed, wed_window = load(sys.argv[1])
-thu, _ = load(sys.argv[2])
+wed, wed_window, wed_start, wed_end = load(sys.argv[1])
+thu, *_ = load(sys.argv[2])
+if SPLIT == 'episode':      # episode-aware cutoffs (see docs/fair-comparison-corrected.md)
+    LIMIT_TRAIN, LIMIT_VAL = pd.Timestamp('2018-02-28 15:44:00'), pd.Timestamp('2018-02-28 16:56:00')
+else:                       # historical fair-comparison rule, as in cic_ids2018_v3_graph_creation.ipynb
+    LIMIT_TRAIN = wed_start + (wed_end - wed_start) * 0.70
+    LIMIT_VAL = wed_start + (wed_end - wed_start) * 0.85
 out_dir = sys.argv[3]
 os.makedirs(out_dir, exist_ok=True)
 split = np.where(wed_window < LIMIT_TRAIN, 'train', np.where(wed_window < LIMIT_VAL, 'val', 'test1'))
@@ -88,14 +103,14 @@ for target in TARGETS:
             xs, frame = parts[s]
             y = frame[target].to_numpy()
             p = model.predict_proba(xs[FEATURES])[:, 1]
+            ap = round(float(average_precision_score(y, p)), 4) if y.any() else float('nan')
             rows.append(dict(target=target, model=name, split=s, flows=len(y), positives=int(y.sum()),
-                             prevalence=round(float(y.mean()), 5),
-                             average_precision=round(float(average_precision_score(y, p)), 4)))
+                             prevalence=round(float(y.mean()), 5), average_precision=ap))
         if name in ('decision_tree_depth_1', 'decision_tree_depth_2'):
             rules[f'{target}/{name}'] = export_text(model, feature_names=FEATURES)
 result = pd.DataFrame(rows)
 result.to_csv(os.path.join(out_dir, 'flow_baselines.csv'), index=False)
-summary = dict(cutoffs=[str(LIMIT_TRAIN), str(LIMIT_VAL)], features=FEATURES,
+summary = dict(split=SPLIT, cutoffs=[str(LIMIT_TRAIN), str(LIMIT_VAL)], features=FEATURES,
                split_counts={s: dict(flows=len(f), **{t: int(f[t].sum()) for t in TARGETS})
                              for s, (_, f) in parts.items()},
                tree_rules=rules)
