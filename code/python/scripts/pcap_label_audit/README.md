@@ -30,6 +30,7 @@ Several scripts hard-code these paths; edit them before running elsewhere.
 | `pcap_content.py` | DNS query names and TLS SNI per source host (pure-Python pcap reader) |
 | `flow_stats_compare.py` | Flow statistics of noise-labeled hosts vs same-image controls vs others |
 | `matched_pairs.py` | Matched-behaviour test: alert rates at frozen thresholds by host group |
+| `matched_pairs_dedup.py` | Same test for experiment 3 (duplicates removed: M0_P0, M1_P0, MLP); rebuilds and verifies flow attribution from the CSV |
 | `pcap_find_executables.py` | Locate packets carrying a Windows executable signature |
 | `evtx_summary.py` | Summarize Windows `.evtx` logs (needs `python-evtx`) |
 
@@ -49,6 +50,7 @@ python3 -I $S/pcap_host_checks.py wed thu        # reads ~3 GB of pcaps, ~10-20 
 python3 -I $S/cicflowmeter_compare.py
 python3 -I $S/flow_stats_compare.py
 ~/data/cic-ids2018/.venv/bin/python -I $S/matched_pairs.py      # needs pyarrow
+~/data/cic-ids2018/.venv/bin/python -I $S/matched_pairs_dedup.py   # after matched_pairs.py; reads the dedup results
 cd ~/data/cic-ids2018/thursday-01-03/pcap && python3 -I $OLDPWD/$S/pcap_content.py \
   capEC2AMAZ-O4EL3NG-172.31.69.{5,8,9,10,12,14,16,17}.pcap capEC2AMAZ-O4EL3NG-172.31.{65.93,66.97,66.78,69.23}.pcap \
   > ~/data/cic-ids2018/analysis/matched/pcap_content_thu.json && cd -
