@@ -59,3 +59,21 @@ python3 -I $S/pcap_content_compare.py
 
 Outputs go to `~/data/cic-ids2018/analysis/label_audit/<day>/` (and `analysis/matched/` for the
 model-score scripts).
+
+## Choices behind the matched-behaviour test
+
+Recovered from the session transcripts and re-checked on 2026-11-18.
+
+**Host groups (Thursday, Test 2).**
+- *Victim:* 172.31.69.13, the documented infected host. It is excluded from every group.
+- *Noise hosts:* the eight other `.69` hosts whose flows carry original labels (.5 .8 .9 .10 .12 .14 .16 .17).
+- *Same-image controls:* 172.31.65.93, 172.31.66.97, 172.31.66.78 and 172.31.69.23.
+- *Other hosts:* every remaining internal (172.31.x.x) host.
+
+**How the controls were chosen.** CIC names each per-host capture in `pcap.zip` as `cap<HOSTNAME>-<IP>`. The noise hosts and the victim all have the host name `EC2AMAZ-O4EL3NG`. On Wednesday about 200 IPs share it (201 in `~/data/cic-ids2018/wed_members.tsv`), so these are presumably instances cloned from one Windows image. Other groups are `DESKTOP-AN3U28N` (76), `PC1` (75) and `WIN-J6GMIG1DQE5` (75); Ubuntu hosts are `UCAP` files. The controls were picked in two steps:
+1. Among Thursday `EC2AMAZ-O4EL3NG` hosts outside 172.31.69.0/24 with zero labeled flows (189 hosts), they were ranked by DNS flows to 172.31.0.2. The top three were kept: .65.93 (11,268 DNS flows, 24 telemetry), .66.97 (11,057; 76) and .66.78 (10,605; 219). Each has about 16k flows, more than any noise host, which rules out activity volume as the explanation.
+2. 172.31.69.23 was added as a same-subnet control. It was also the Wednesday control. Its own outbound flows are unlabeled. On Thursday it receives 265 labeled flows, all from the victim's documented Nmap scan.
+
+**Representative runs and thresholds.**
+- *Seeds:* the seeds in `matched_pairs.py` and `matched_pairs_dedup.py` are the champions in each results folder's `champions_by_validation.csv`, all with `selection_status == selected` under the one-SD rule. In the main comparison they are MLP 777, Global 42, Host-history 2024, E-GraphSAGE 2024, M0_P0 2024, M0_P1 123, M1_P0 2024 and M1_P1 2024. In the deduplicated comparison they are M0_P0 99, M1_P0 123 and MLP 2024.
+- *Thresholds:* each threshold is that run's validation max-F1 threshold. For the main comparison it is `frozen_thresholds` in the analysis manifest, which equals `Optimal_Threshold`. For the deduplicated comparison it is `record.json`.
